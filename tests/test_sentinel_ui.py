@@ -37,8 +37,8 @@ class _Client:
         while True:
             try:
                 conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=15)
-                conn.request("GET", "/api/meta")
-                conn.getresponse().read()
+                conn.request("GET", "/api/session")
+                self.session = json.loads(conn.getresponse().read())
                 self.conn = conn
                 return
             except Exception:
@@ -48,7 +48,7 @@ class _Client:
 
     def request(self, method: str, path: str, body: dict | None = None):
         payload = json.dumps(body).encode() if body is not None else None
-        headers = {"Content-Type": "application/json"} if payload else {}
+        headers = {"Content-Type": "application/json", "X-Atlas-Session": self.session["token"], "X-Atlas-Project": self.session["project"]} if payload else {}
         with self.lock:
             try:
                 self.conn.request(method, path, body=payload, headers=headers)

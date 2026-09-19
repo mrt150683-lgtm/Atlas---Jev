@@ -230,13 +230,24 @@ def build_graph(records: list[FileRecord]) -> nx.DiGraph:
             line_count=rec.line_count,
             size_bytes=rec.size_bytes,
             mtime=rec.mtime,
+            content_hash=rec.content_hash,
             summary="",
         )
         if rec.language == "python":
             module_index[_module_name(rec.rel_path)] = rec.rel_path
         info = _parse_file(rec)
         if info is None:  # unparsed language — bare file node only (still summarised)
+            graph.nodes[f"file:{rec.rel_path}"]["parse_status"] = "unsupported"
             continue
+        file_attrs = graph.nodes[f"file:{rec.rel_path}"]
+        file_attrs["parse_status"] = "failed" if info.parse_error else (
+            "complete" if rec.language == "python" else "heuristic"
+        )
+        if info.parse_error:
+            file_attrs["parse_error"] = info.parse_error
+            file_attrs["analysis_warnings"] = [
+                "Structural parsing failed; missing components and connections are unknown."
+            ]
         infos[rec.rel_path] = info
         # Edge provenance: exact syntax tree vs pattern-based extraction. Every
         # edge carries where it came from so consumers can weigh confidence.

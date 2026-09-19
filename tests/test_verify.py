@@ -28,13 +28,13 @@ def test_coverage_cache_reuses_unchanged_evidence(tmp_path: Path, monkeypatch) -
     messages: list[str] = []
     monkeypatch.setattr("cms.verify.subprocess.run", _fake_coverage_runner(calls))
 
-    assert run_coverage(tmp_path, echo=messages.append) == {"files": {}}
+    assert run_coverage(tmp_path, echo=messages.append)["files"] == {}
     assert len(calls) == 2
     assert any("stage 1/3" in message for message in messages)
     assert any("stage 3/3" in message for message in messages)
 
     messages.clear()
-    assert run_coverage(tmp_path, echo=messages.append) == {"files": {}}
+    assert run_coverage(tmp_path, echo=messages.append)["files"] == {}
     assert len(calls) == 2
     assert messages == ["Coverage cache is current — reusing mapped per-test contexts."]
 

@@ -221,6 +221,8 @@ def build_alignment(
 ) -> dict:
     """Verdict a diff against a captured intent. Returns a JSON-able record."""
     graph = mem.graph
+    from .verify import behavioral_status, verification_input_hash, verification_status
+    input_hash = verification_input_hash(root)
     changed = git_changed_files(root, base=base)
 
     # Semantic hits and blast-radius paths are advisory candidates: a search
@@ -264,16 +266,19 @@ def build_alignment(
     has_drift_feature = False
     for name, feat in sorted(touched_features.items()):
         review = feat.get("review") or {}
-        verdict = review.get("verdict")
+        from .review import review_input_hash
+        review_current = bool(review) and review.get("input_hash") == review_input_hash(root, graph, feat)
+        verdict = review.get("verdict") if review_current else None
         if verdict == "drift":
             has_drift_feature = True
         feature_reviews.append({
             "feature": name,
             "verdict": verdict or "unverified",
             "headline": review.get("headline", ""),
+            "current": review_current,
             "exercised_by": len(feat.get("exercised_by", [])),
         })
-        for g in (review.get("gaps") or [])[:4]:
+        for g in ((review.get("gaps") or [])[:4] if review_current else []):
             feature_gaps.append(f"{name}: {g}")
 
     # approved intent (decision lock) for touched features — the durable word
@@ -284,23 +289,33 @@ def build_alignment(
         from .decisions import DecisionStore
 
         store = DecisionStore(root / config.MEMORY_DIR_NAME, root=root)
-        for name in sorted(touched_features):
+        for name in [None, *sorted(touched_features)]:
             dec = store.approved_for(name)
             if dec:
                 approved_intent.append({
                     "feature": name, "decision_id": dec["id"],
                     "title": dec["title"], "behaviour": dec["intent"]["behaviour"],
+                    "intent": dec["intent"],
                     "prohibited": dec["intent"].get("prohibited", []),
                     "approved_at": dec.get("approved_at"),
                 })
-    except Exception:
-        pass
+    except Exception as exc:
+        feature_gaps.append(f"approved-intent-unavailable: {type(exc).__name__}")
 
     # sentinel findings landing on changed files
     findings = _findings_on_change(root, changed_set, scan=scan)
     critical_on_change = any(f.get("severity") == CRITICAL for f in findings)
 
-    has_tests = bool(radius["tests"])
+    has_tests = bool(radius["tests"])  # candidates from graph reachability, NOT coverage
+    execution = {name: verification_status(root, feat.get("verify_result"), input_hash=input_hash)
+                 for name, feat in touched_features.items()}
+    criteria = {name: behavioral_status(root, feat.get("behavioral_evidence"), goal=task, input_hash=input_hash)
+                for name, feat in touched_features.items()}
+    criterion_pass = (intent_pack.get("intent_source", "explicit") == "explicit"
+                      and bool(criteria) and all(r["passed"] for r in criteria.values()))
+    test_failed = any(r["status"] == "failed" for r in execution.values()) or any(
+        r["status"] == "failed" for r in criteria.values())
+    scope_alignment = "aligned" if touched_expected and not (untouched_required or unstated) else "partial"
 
     # ── verdict synthesis (same vocabulary as cms review) ────────────────
     if not changed:
@@ -314,15 +329,21 @@ def build_alignment(
     elif not touched_expected:
         verdict = "unverified"
         headline = "Changed files don't map to the declared intent — can't confirm it was done here."
-    elif not has_tests:
+    elif test_failed:
+        verdict = "partial"
+        headline = "Current test evidence contains failures; the change is not verified."
+    elif not has_tests and not criterion_pass:
         verdict = "unverified"
-        headline = "Declared targets were touched, but no mapped test covers the change — can't prove it landed."
+        headline = "Declared targets were touched, but no test candidates or current criterion results establish behavior."
     elif findings or untouched_required or unstated or feature_gaps:
         verdict = "partial"
-        headline = "Declared targets were touched and covered, but gaps remain (see below)."
-    else:
+        headline = "Declared targets were touched, but scope or evidence gaps remain (see below)."
+    elif criterion_pass:
         verdict = "aligned"
-        headline = f"Change hits the declared targets and is covered by {len(radius['tests'])} test(s)."
+        headline = "Declared criterion tests passed for this goal; assertion adequacy is not independently established."
+    else:
+        verdict = "unverified"
+        headline = "Scope matches, but graph test candidates and test passes alone do not establish the intended behavior. Run cms verify-plan."
 
     assert verdict in VERDICTS
 
@@ -332,7 +353,11 @@ def build_alignment(
     for p in unstated:
         gaps.append(f"unstated-change: {p}")
     if changed and not has_tests:
-        gaps.append("no-verifying-tests: the changed code isn't covered by any mapped test")
+        gaps.append("no-verifying-tests: no candidate tests found in the dependency graph")
+    if changed and not criterion_pass:
+        gaps.append("no-current-criterion-evidence: run an explicit verification plan for this exact goal")
+    if test_failed:
+        gaps.append("current-tests-failed: one or more recorded test runs failed")
     gaps.extend(feature_gaps)
 
     return {
@@ -342,6 +367,13 @@ def build_alignment(
         "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "verdict": verdict,
         "headline": headline,
+        "scope_alignment": scope_alignment,
+        "completion_proven": False,
+        "evidence_basis": "declared_criterion_test_runs" if criterion_pass else "structural_scope_only",
+        "test_execution": execution,
+        "criterion_evidence": criteria,
+        "evidence_limitations": ["Graph-reachable tests are candidates, not coverage.",
+                                 "Declared requirement-to-test links need human review for assertion adequacy; local tests do not prove all behavior."],
         "changed": changed,
         "touched_expected": touched_expected,
         "related_not_touched": related_not_touched,

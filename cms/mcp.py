@@ -28,6 +28,13 @@ HISTORY_FOR_MCP = 6  # transcript turns fed back for conversational continuity
 
 TOOLS = [
     {
+        "name": "get_context_decision",
+        "description": "Inspect how Atlas selected context: local order, Jev proposal, selected nodes, freshness and fallback. Pass a receipt id from query_codebase or a task brief; omit for recent decisions. Relevance is not verification.",
+        "inputSchema": {"type": "object", "properties": {
+            "receipt_id": {"type": "string", "description": "Context selection receipt ID; omit for recent decisions."},
+        }},
+    },
+    {
         "name": "query_codebase",
         "description": "Search the codebase memory by intent (natural language). Returns ranked files/functions/classes/features with paths, line ranges, summaries and call connections. Use this BEFORE grepping or reading files.",
         "inputSchema": {
@@ -254,7 +261,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "feature": {"type": "string", "description": "Filter to one feature (optional)."},
-                "active_only": {"type": "boolean", "description": "Only proposed/approved decisions (default true)."},
+                "active_only": {"type": "boolean", "description": "Only proposed or operative human-approved decisions, including completed requirements (default true)."},
             },
         },
     },
@@ -466,7 +473,19 @@ class MCPServer:
     # ── tool implementations ────────────────────────────────────────────
 
     def query_codebase(self, query: str, top_k: int = 5) -> list[dict]:
-        return [asdict(r) for r in self.memory().query_intent(query, top_k=top_k)]
+        from .context_selection import select_context
+        return select_context(self.memory(), self.root, query, top_k,
+                              source="mcp_query").results()
+
+    def get_context_decision(self, receipt_id: str | None = None) -> dict:
+        from .context_selection import compact_receipt, get_receipt, history
+        from .decision import status
+        if receipt_id is not None:
+            receipt = get_receipt(self.root, receipt_id)
+            return receipt if receipt is not None else {"error": "Context decision not found in retained history."}
+        return {"settings": status(self.root), "items": [
+            {**compact_receipt(row), "query": row.get("query"), "created_at": row.get("created_at")}
+            for row in history(self.root)["items"][:10]]}
 
     def get_file_summary(self, path: str) -> dict:
         graph = self.memory().graph
@@ -591,8 +610,11 @@ class MCPServer:
         return {
             "intent": pack.get("task"),
             "source": pack.get("intent_source"),
+            "context_selection": pack.get("context_selection"),
             "relevant_code": [
-                {"kind": t["kind"], "name": t["name"], "path": t.get("path"), "lines": t.get("lines")}
+                {"kind": t["kind"], "name": t["name"], "path": t.get("path"), "lines": t.get("lines"),
+                 "source_freshness": t.get("source_freshness", "unknown"),
+                 "analysis_warnings": list(t.get("analysis_warnings") or [])}
                 for t in pack.get("relevant_code", [])
             ],
             "features": [f["name"] for f in pack.get("features", [])],
@@ -699,6 +721,7 @@ class MCPServer:
             return {"error": str(exc)}
         return {"answer": entry["a"], "evidence_nodes": entry["evidence_nodes"],
                 "matched_features": entry["matched_features"],
+                "context_selection": entry.get("context_selection"),
                 "provider": entry["provider"], "model": entry["model"]}
 
     # @memory:feature:Constellation
@@ -1056,6 +1079,11 @@ class MCPServer:
             return {"error": "path outside project root"}
         if target.suffix.lower() not in LANGUAGE_BY_EXTENSION or not target.is_file():
             return {"error": "not a scanned source file"}
+        from .scanner import scan
+        relative = target.relative_to(self.root).as_posix()
+        if (not self.memory().graph.has_node(f"file:{relative}")
+                or not any(record.rel_path == relative for record in scan(self.root))):
+            return {"error": "source is outside the current scanned project scope"}
         lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
         end = min(end_line or len(lines), len(lines))
         start = max(1, start_line)

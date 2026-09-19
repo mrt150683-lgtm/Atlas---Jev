@@ -67,10 +67,23 @@ def export_bundle(root: Path, out_path: Path | None = None,
     }
 
     mem_count = 0
+    from .exporter import EXPORT_MANIFEST
+
+    managed = {}
+    for folder in ("summaries", "features"):
+        manifest_path = memory_dir / folder / EXPORT_MANIFEST
+        if manifest_path.is_file():
+            record = json.loads(manifest_path.read_text(encoding="utf-8"))
+            if not isinstance(record, dict) or not isinstance(record.get("files"), dict):
+                raise ValueError(f"Invalid generated export manifest: {manifest_path}")
+            managed[folder] = set(record["files"]) | {EXPORT_MANIFEST}
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as z:
         for p in sorted(memory_dir.rglob("*")):
             if p.is_file():
+                relative = p.relative_to(memory_dir)
+                if relative.parts[0] in managed and relative.as_posix().split("/", 1)[1] not in managed[relative.parts[0]]:
+                    continue  # preserved local notes/obsolete edited copies are not current generated memory
                 arc = (Path(config.MEMORY_DIR_NAME) / p.relative_to(memory_dir)).as_posix()
                 z.write(p, arcname=arc)
                 mem_count += 1

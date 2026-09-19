@@ -1,0 +1,206 @@
+{
+  "date": "2026-09-19",
+  "branch": "codex/jev-integration",
+  "base_revision": "eab1ac47a9ab8d508e7f08c5aab1ce985abd8b7e",
+  "revision_scope": "Base revision plus current dirty working tree; prior changes preserved; no commit or push",
+  "depth": "focused",
+  "scope": "Jev context selection, disclosure policy, agent/user context delivery, receipts and evaluation",
+  "verdict": "PARTIAL",
+  "contract_verdict": "PASS",
+  "environment": {
+    "python": "3.14.3 with workspace virtual-environment site-packages",
+    "home_isolation": ".memory/jev-work/test-home",
+    "browser_project": ".memory/jev-work/browser-demo",
+    "providers": "Fake Jev transport and mock summaries; no live Jev calls",
+    "desktop_executable_rebuilt": false,
+    "temporary_browser_and_server_closed": true
+  },
+  "tests": {
+    "python": {
+      "passed": 555,
+      "failed": 0,
+      "skipped": 0,
+      "seconds": 85.43,
+      "report": ".memory/jev-work/pytest-final.xml"
+    },
+    "node": {
+      "passed": 20,
+      "failed": 0,
+      "context_tests": 15,
+      "connection_tests": 5
+    },
+    "browser": [
+      "explicit preview",
+      "required target",
+      "saved reload",
+      "exact historical receipt",
+      "changed source",
+      "unsaved receipt warning"
+    ]
+  },
+  "flows": [
+    {
+      "id": "agent-context",
+      "goal": "Preserve skill/tool access and shared context receipts",
+      "source": "USER-STATED",
+      "verdict": "PASS",
+      "evidence": [
+        "tests/test_context_surfaces.py",
+        "tests/test_mcp.py"
+      ],
+      "finding_ids": [
+        "JEV-003"
+      ]
+    },
+    {
+      "id": "egress-policy",
+      "goal": "Optional bounded disclosure under current project policy",
+      "source": "INFERRED",
+      "verdict": "PASS",
+      "evidence": [
+        "tests/test_decision.py",
+        "tests/test_context_selection.py",
+        "tests/test_context_surfaces.py"
+      ],
+      "finding_ids": [
+        "JEV-001"
+      ]
+    },
+    {
+      "id": "freshness",
+      "goal": "Keep stale and uncertain evidence labelled across actual prompts",
+      "source": "USER-STATED",
+      "verdict": "PASS",
+      "evidence": [
+        "tests/test_context_selection.py",
+        "tests/test_context_freshness_surfaces.py"
+      ],
+      "finding_ids": [
+        "JEV-002",
+        "JEV-007"
+      ]
+    },
+    {
+      "id": "human-receipts",
+      "goal": "Inspect actual delivery, alternatives and limits",
+      "source": "USER-STATED",
+      "verdict": "PASS",
+      "evidence": [
+        "tests/test_context_ui.cjs",
+        "browser observations in companion Markdown"
+      ],
+      "finding_ids": [
+        "JEV-006",
+        "JEV-008"
+      ]
+    },
+    {
+      "id": "evaluation",
+      "goal": "Measure retrieval without claiming coding effectiveness",
+      "source": "INFERRED",
+      "verdict": "PASS",
+      "evidence": [
+        "tests/test_context_evaluation.py",
+        "tests/test_context_surfaces.py"
+      ],
+      "finding_ids": [
+        "JEV-004",
+        "JEV-005"
+      ]
+    },
+    {
+      "id": "coding-effectiveness",
+      "goal": "Streamline AI coding development",
+      "source": "USER-STATED",
+      "verdict": "PARTIAL",
+      "evidence": [
+        "docs/JEV_INTEGRATION.md"
+      ],
+      "unverified": [
+        "live retrieval quality",
+        "coding success",
+        "total cost",
+        "total latency"
+      ]
+    },
+    {
+      "id": "owner-understanding",
+      "goal": "Keep the owner deeply informed",
+      "source": "USER-STATED",
+      "verdict": "PARTIAL",
+      "evidence": [
+        "browser local flows"
+      ],
+      "unverified": [
+        "human comprehension study",
+        "connected intent-to-change work review",
+        "third-party agent execution visibility"
+      ]
+    }
+  ],
+  "findings": [
+    {
+      "id": "JEV-001",
+      "impact": "P1",
+      "title": "Current scope and exclusions did not constrain old indexed summaries",
+      "status": "fixed_and_retested"
+    },
+    {
+      "id": "JEV-002",
+      "impact": "P1",
+      "title": "Downstream briefs and chat dropped freshness metadata",
+      "status": "fixed_and_retested"
+    },
+    {
+      "id": "JEV-003",
+      "impact": "P2",
+      "title": "Declared intent omitted selection receipt",
+      "status": "fixed_and_retested"
+    },
+    {
+      "id": "JEV-004",
+      "impact": "P2",
+      "title": "Evaluation referenced unpersisted receipts without embedding evidence",
+      "status": "fixed_and_retested"
+    },
+    {
+      "id": "JEV-005",
+      "impact": "P2",
+      "title": "Labels-overwrite preflight ran after evaluation",
+      "status": "fixed_and_retested"
+    },
+    {
+      "id": "JEV-006",
+      "impact": "P2",
+      "title": "Viewer claimed saved despite history failure",
+      "status": "fixed_and_retested"
+    },
+    {
+      "id": "JEV-007",
+      "impact": "P1",
+      "title": "Old feature narratives could receive current freshness",
+      "status": "fixed_and_retested"
+    },
+    {
+      "id": "JEV-008",
+      "impact": "P2",
+      "title": "Rejected Windows HTTP requests could abort before error delivery",
+      "status": "fixed_and_retested"
+    }
+  ],
+  "unverified_conditions": [
+    "Real Jev API/model performance",
+    "Statistical retrieval improvement",
+    "Coding task success and total cost",
+    "Owner comprehension",
+    "Mobile browser layout and exhaustive accessibility",
+    "Rebuilt desktop executable",
+    "All other Atlas features"
+  ],
+  "next_steps": [
+    "Label held-out retrieval cases before shadow evaluation",
+    "Compare paired coding tasks including failures and preparation",
+    "Build and evaluate connected intent/context/change/check review",
+    "Adopt assist only after agreed measurable gates"
+  ]
+}

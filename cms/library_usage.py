@@ -8,13 +8,13 @@ never silently rewrite the agent's original assessment.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import json
 from pathlib import Path
 import secrets
 import threading
 from typing import Any, Iterable
 
-from .semantic_state import atomic_write_json
+from .storage import atomic_write_json
+from .storage import locked_store, read_json
 
 
 OUTCOMES = {"success", "partial", "failure", "unknown"}
@@ -62,21 +62,13 @@ class LibraryUsageStore:
         self.path = self.memory_dir / "library_usage.json"
 
     def _read(self) -> dict[str, Any]:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8")) if self.path.exists() else {}
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(f"Library usage ledger is unreadable: {self.path}") from exc
-        if not isinstance(data, dict):
-            data = {}
-        events = data.get("events")
-        if not isinstance(events, list):
-            events = []
-        return {"schema": 1, "events": events}
+        return read_json(self.path, {"schema": 1, "events": []}, rows="events")
 
     def _write(self, data: dict[str, Any]) -> None:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
         atomic_write_json(self.path, data)
 
+    @locked_store()
     def record(
         self,
         assets: list[dict[str, Any]],
@@ -143,6 +135,7 @@ class LibraryUsageStore:
             self._write(data)
         return event
 
+    @locked_store()
     def rate(
         self,
         use_id: str,

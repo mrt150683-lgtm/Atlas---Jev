@@ -4,15 +4,14 @@ The ledger is a human-maintained JSON file (``docs/feature_ledger.json``; the
 repo had no completion ledger before Sentinel, so this is its smallest correct
 structure). Each entry claims a status and lists evidence. The auditor checks
 those claims against reality: evidence files must exist on disk, the feature
-should exist in the memory graph, ``complete`` requires mapped exercising tests
-(graph ``exercised_by`` or listed test files) and no drift review verdict.
+should exist in the memory graph, ``complete`` requires current declared
+criterion test runs, no current test failure, and no drift review verdict.
 Features present in the graph but missing from the ledger are surfaced too.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import date
 from pathlib import Path
 
 from . import make_finding
@@ -46,6 +45,11 @@ def load_ledger(root: Path) -> tuple[list[dict], list[str]]:
             continue
         if entry.get("status") not in STATUSES:
             errors.append(f"{entry.get('feature')}: invalid status {entry.get('status')!r}")
+        evidence = entry.get("evidence", {})
+        if not isinstance(evidence, dict) or any(not isinstance(evidence.get(k, []), list) or
+                any(not isinstance(p, str) for p in evidence.get(k, [])) for k in ("files", "tests")):
+            errors.append(f"{entry.get('feature')}: evidence must contain lists of file/test path strings")
+            continue
         valid.append(entry)
     return valid, errors
 
@@ -83,6 +87,8 @@ def audit_ledger(root: Path) -> list[dict]:
         for err in errors
     ]
     graph_feats = _graph_features(root)
+    from ..verify import behavioral_status, verification_input_hash, verification_status
+    fingerprint = verification_input_hash(root)
 
     if not ledger_path(root).is_file():
         findings.append(make_finding(
@@ -126,6 +132,16 @@ def audit_ledger(root: Path) -> list[dict]:
 
         graph_feat = graph_feats.get(name)
         if status == "complete":
+            criteria = behavioral_status(root, (graph_feat or {}).get("behavioral_evidence"), input_hash=fingerprint)
+            execution = verification_status(root, (graph_feat or {}).get("verify_result"), input_hash=fingerprint)
+            if not criteria["passed"] or execution["status"] == "failed":
+                findings.append(make_finding(
+                    "ledger", "high", f"{name} is marked complete without current successful criterion evidence",
+                    area="ledger_completion", feature=name, file=str(LEDGER_RELPATH),
+                    pattern="complete-without-current-criteria",
+                    evidence=[f"criterion state: {criteria['status']}", f"test execution: {execution['status']}"],
+                    risk="Execution mapping or test-file existence cannot establish the declared behavior.",
+                    recommendation="Run cms verify-plan with explicit requirement-to-test links, or downgrade to in_progress."))
             exercised = len(_tests_of(graph_feat))
             if not exercised and not (listed_tests and not missing_tests):
                 findings.append(make_finding(
@@ -186,12 +202,18 @@ def init_ledger(root: Path, overwrite: bool = False) -> Path:
     path = ledger_path(root)
     if path.is_file() and not overwrite:
         raise FileExistsError(f"{path} already exists (use overwrite to regenerate)")
+    from ..verify import behavioral_status, verification_input_hash, verification_status
+    fingerprint = verification_input_hash(root)
     entries = []
     for name, feat in sorted(_graph_features(root).items()):
-        tests = _tests_of(feat)
+        tests = sorted(set(_tests_of(feat)) | {
+            t for criterion in (feat.get("behavioral_evidence") or {}).get("criteria", [])
+            for t in criterion.get("test_ids", [])})
+        criteria = behavioral_status(root, feat.get("behavioral_evidence"), input_hash=fingerprint)
+        complete = criteria["passed"] and verification_status(root, feat.get("verify_result"), input_hash=fingerprint)["status"] != "failed"
         entries.append({
             "feature": name,
-            "status": "complete" if tests else "in_progress",
+            "status": "complete" if complete else "in_progress",
             "evidence": {
                 "files": sorted({
                     m.split(":", 1)[1].split("::")[0]
@@ -203,8 +225,8 @@ def init_ledger(root: Path, overwrite: bool = False) -> Path:
                 "tests": tests[:12],
                 "manual_verification": "",
             },
-            "known_limitations": [] if tests else ["no exercising tests mapped yet"],
-            "last_verified": date.today().isoformat(),
+            "known_limitations": [criteria["limitation"]] if complete else ["no current successful declared criterion verification"],
+            "last_verified": (feat.get("behavioral_evidence") or {}).get("at") if complete else None,
         })
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({

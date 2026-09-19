@@ -168,17 +168,39 @@ def run_app(
         echo("  note: mock provider — AI feature discovery, review and suggestions "
              "are skipped until an API key is configured (cms config set anthropic_api_key …)")
 
-    watcher = threading.Thread(
-        target=watch, args=(root, provider), kwargs={"interval": interval, "echo": echo},
-        daemon=True, name="cms-watch",
-    )
-    watcher.start()
+    watch_lock = threading.Lock()
+    watch_state = {"stop": None, "thread": None}
+
+    def retarget_watch(target):
+        # Stop the old loop immediately; let an in-flight update finish on its
+        # original project before starting the next loop.
+        with watch_lock:
+            if watch_state["stop"]:
+                watch_state["stop"].set()
+            previous = watch_state["thread"]
+            stop = threading.Event()
+
+            def run():
+                if previous:
+                    previous.join()
+                if not stop.is_set():
+                    watch(target, provider, interval=interval, echo=echo, stop_event=stop)
+
+            watcher = threading.Thread(target=run, daemon=True, name="cms-watch")
+            watch_state.update(stop=stop, thread=watcher)
+            watcher.start()
+
+    retarget_watch(root)
     try:
-        serve(root, port=port, open_browser=open_browser, open_path=landing)  # blocks until Ctrl+C
+        serve(root, port=port, open_browser=open_browser, open_path=landing,
+              on_switch_root=retarget_watch)  # blocks until Ctrl+C
     except OSError as exc:
         echo(f"Could not start the UI server on port {port}: {exc}")
         echo("Is another CMS already running? Try:  CMS.exe app --port 7718")
         _pause_if_frozen()
+    finally:
+        with watch_lock:
+            watch_state["stop"].set()
 
 
 def _pause_if_frozen() -> None:

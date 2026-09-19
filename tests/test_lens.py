@@ -53,6 +53,15 @@ def test_fallback_tldr_is_first_sentence() -> None:
                    "source records.")
 
 
+def test_warning_after_provider_limit_survives_compression(tmp_path):
+    warning = "However, a failed write can cause data loss and must be investigated."
+    source = ("Ordinary implementation detail. " * 130) + warning
+    result = rewrite_batch(tmp_path, "tldr", [{"id": "risk", "text": source}], FakeProvider())
+    assert warning in result["results"]["risk"]
+    assert result["originals"]["risk"] == source
+    assert result["source_truncated"]["risk"] is True
+
+
 def test_fallback_adhd_is_short_bullets() -> None:
     out = fallback_rewrite("First point here. Second point here. Third. Fourth. Fifth.", "adhd")
     lines = out.splitlines()

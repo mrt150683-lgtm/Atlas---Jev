@@ -64,9 +64,10 @@ def test_aligned_when_target_touched_and_covered(tmp_path, monkeypatch):
     root = _project(tmp_path)
     monkeypatch.setattr(align, "git_changed_files", lambda r, base="HEAD": ["core.py"])
     rec = build_alignment(_mem(root), root, _intent(["core.py"]))
-    assert rec["verdict"] == "aligned", rec["headline"]
+    assert rec["verdict"] == "unverified"
+    assert rec["scope_alignment"] == "aligned", rec["headline"]
     assert any("test_service" in t for t in rec["impact"]["tests"])
-    assert rec["gaps"] == []
+    assert any(g.startswith("no-current-criterion-evidence:") for g in rec["gaps"])
 
 
 def test_unverified_when_no_covering_test(tmp_path, monkeypatch):
@@ -103,7 +104,8 @@ def test_semantic_candidates_are_advisory_not_mandatory(tmp_path, monkeypatch):
 
     rec = build_alignment(_mem(root), root, intent)
 
-    assert rec["verdict"] == "aligned"
+    assert rec["verdict"] == "unverified"
+    assert rec["scope_alignment"] == "aligned"
     assert rec["related_not_touched"] == ["service.py"]
     assert not any(g.startswith("intent-target-untouched") for g in rec["gaps"])
 
@@ -131,7 +133,8 @@ def test_intent_justified_support_files_are_not_scope_creep(tmp_path, monkeypatc
 
     rec = build_alignment(_mem(root), root, intent)
 
-    assert rec["verdict"] == "aligned"
+    assert rec["verdict"] == "unverified"
+    assert rec["scope_alignment"] == "aligned"
     assert not any(g.startswith("unstated-change") for g in rec["gaps"])
 
 
@@ -154,7 +157,8 @@ def test_graph_evidence_justifies_source_missed_by_bounded_search(tmp_path, monk
 
     rec = build_alignment(_mem(root), root, intent)
 
-    assert rec["verdict"] == "aligned"
+    assert rec["verdict"] == "unverified"
+    assert rec["scope_alignment"] == "aligned"
     assert rec["intent_justified_sources"] == ["service.py"]
     assert not any(g == "unstated-change: service.py" for g in rec["gaps"])
 

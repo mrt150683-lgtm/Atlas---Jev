@@ -33,7 +33,7 @@ STATE_FILENAME = "semantic_state.json"
 STAGES = ("summaries", "features", "hierarchy", "review", "suggestions")
 # bump when DISCOVERY_PROMPT / feature semantics change enough that old
 # discovery output should be considered non-current
-DISCOVERY_SCHEMA_VERSION = 1
+DISCOVERY_SCHEMA_VERSION = 2
 
 NEVER_RUN = {"status": "never_run"}
 
@@ -96,14 +96,20 @@ def discovery_input_hash(graph) -> str:
     file set, the summaries fed into the prompt, declared-feature anchors,
     and the discovery schema version. Ordering-stable; no timestamps."""
     files = sorted(
-        (a.get("path", ""), (a.get("summary") or "").strip())
+        (a.get("path", ""), (a.get("summary") or "").strip(),
+         a.get("content_hash", ""), a.get("parse_status", "unknown"),
+         tuple(a.get("analysis_warnings") or []))
         for _, a in graph.nodes(data=True) if a.get("type") == "file"
     )
     anchors = sorted(
         (a.get("path") or a.get("qualname") or n, json.dumps(a.get("anchors"), sort_keys=True))
         for n, a in graph.nodes(data=True) if a.get("anchors")
     )
-    return _sha([DISCOVERY_SCHEMA_VERSION, files, anchors])
+    components = sorted(
+        (n, a.get("signature", "")) for n, a in graph.nodes(data=True)
+        if a.get("type") in ("func", "class")
+    )
+    return _sha([DISCOVERY_SCHEMA_VERSION, files, anchors, components])
 
 
 def feature_set_hash(graph) -> str:

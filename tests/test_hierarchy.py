@@ -105,10 +105,10 @@ def test_llm_grouping_builds_part_of_chain_and_records_evidence(tmp_path: Path) 
     ran = ensure_hierarchy(memory, graph, provider, echo=lambda *_: None)
     assert ran is True and provider.calls == 1
     # feature -> component -> system PART_OF chain
-    assert graph.has_edge("feature:Greeting", "component:Greetings")
-    assert graph.has_edge("component:Greetings", "system:TestApp")
-    assert graph.edges["feature:Greeting", "component:Greetings"]["type"] == "PART_OF"
-    assert graph.edges["feature:Greeting", "component:Greetings"]["provenance"] == "llm"
+    assert graph.has_edge("feature:Greeting", "component:TestApp/Greetings")
+    assert graph.has_edge("component:TestApp/Greetings", "system:TestApp")
+    assert graph.edges["feature:Greeting", "component:TestApp/Greetings"]["type"] == "PART_OF"
+    assert graph.edges["feature:Greeting", "component:TestApp/Greetings"]["provenance"] == "llm"
     rec = ss.stage(ss.load_state(memory), "hierarchy")
     assert rec["status"] == "complete" and rec["real_provider"] is True
     assert rec["input_hash"] == hierarchy_input_hash(graph)
@@ -126,7 +126,7 @@ def test_unchanged_input_reapplies_from_state_without_charging(tmp_path: Path) -
     ran = ensure_hierarchy(memory, graph2, dead, echo=lambda *_: None)
     assert ran is False and dead.calls == 0  # served from durable state
     assert graph2.has_node("system:TestApp")
-    assert graph2.has_edge("component:Volume", "system:TestApp")
+    assert graph2.has_edge("component:TestApp/Volume", "system:TestApp")
 
 
 def test_failure_records_failed_and_keeps_structural_view(tmp_path: Path) -> None:
@@ -172,8 +172,8 @@ def test_hierarchy_survives_incremental_update(tmp_path: Path) -> None:
     from cms.memory import CodebaseMemory
 
     saved = CodebaseMemory.load(memory / "graph.json").graph
-    assert saved.has_node("system:Solo") and saved.has_node("component:Core")
-    assert saved.has_edge("feature:Greeting", "component:Core")
+    assert saved.has_node("system:Solo") and saved.has_node("component:Solo/Core")
+    assert saved.has_edge("feature:Greeting", "component:Solo/Core")
     assert saved.graph.get("schema_version") == 2
     # mock update must not downgrade the real completion record
     assert ss.stage(ss.load_state(memory), "hierarchy")["status"] == "complete"

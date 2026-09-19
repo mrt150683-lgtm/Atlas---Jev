@@ -1,6 +1,7 @@
 """Hermes Sentinel core logic — scanners, ledger audit, rules, store, gate."""
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -20,14 +21,35 @@ from cms.sentinel.workflows import run_workflow_checks
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
+@pytest.fixture(scope="module")
+def generated_project(tmp_path_factory):
+    """Build fresh memory from tracked source, independent of local .memory."""
+    from cms.features import build_features
+    from cms.graph_builder import build_graph
+    from cms.memory import CodebaseMemory
+    from cms.providers import MockProvider
+    from cms.scanner import scan
+
+    root = tmp_path_factory.mktemp("sentinel_source")
+    shutil.copytree(REPO_ROOT / "cms", root / "cms", ignore=shutil.ignore_patterns("__pycache__"))
+    for name in ("README.md", "SKILL.md", "pyproject.toml"):
+        if (REPO_ROOT / name).is_file():
+            shutil.copy2(REPO_ROOT / name, root / name)
+    graph = build_graph(scan(root))
+    build_features(graph, MockProvider())
+    (root / ".memory").mkdir()
+    CodebaseMemory(graph).save(root / ".memory" / "graph.json")
+    return root
+
+
 def _patterns(findings):
     return {f["pattern"] for f in findings}
 
 
 # ── project scanner ─────────────────────────────────────────────────────────
 
-def test_inventory_detects_real_surfaces():
-    inv = build_inventory(REPO_ROOT)
+def test_inventory_detects_real_surfaces(generated_project):
+    inv = build_inventory(generated_project)
     assert inv["file_count"] > 20
     assert "cms/sentinel/runner.py" in inv["files"]["source"]
     assert any("sentinel" in c for c in inv["cli_commands"])
@@ -140,8 +162,8 @@ def test_ledger_parses_and_flags_unbacked_completion(tmp_path):
     assert "missing-evidence-file" in patterns       # Ghost's file doesn't exist
     assert "complete-without-tests" in patterns      # Ghost claims complete, no tests
     assert "complete-without-evidence" in patterns   # Ghost isn't in the graph either
-    # Real has graph verified_by, so no completion complaint about it
-    assert not any(f["feature"] == "Real" and f["area"] == "ledger_completion"
+    # Legacy mapping is not a current criterion run.
+    assert any(f["feature"] == "Real" and f["pattern"] == "complete-without-current-criteria"
                    for f in audit_ledger(tmp_path))
 
 
@@ -167,7 +189,7 @@ def test_ledger_init_generates_conservative_statuses(tmp_path):
     out = init_ledger(tmp_path)
     data = json.loads(out.read_text(encoding="utf-8"))
     by_name = {e["feature"]: e for e in data["features"]}
-    assert by_name["Tested"]["status"] == "complete"
+    assert by_name["Tested"]["status"] == "in_progress"
     assert by_name["Untested"]["status"] == "in_progress"
     with pytest.raises(FileExistsError):
         init_ledger(tmp_path)
@@ -241,8 +263,8 @@ def test_domain_rules_flag_provenance_and_ghost_members(tmp_path):
     assert "roi-mismatch" in patterns
 
 
-def test_domain_rules_clean_on_this_repo():
-    findings = [f for f in check_domain_rules(REPO_ROOT)
+def test_domain_rules_clean_on_this_repo(generated_project):
+    findings = [f for f in check_domain_rules(generated_project)
                 if f["severity"] in ("critical", "high")]
     assert not findings, [f["summary"] for f in findings]
 

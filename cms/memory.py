@@ -52,6 +52,7 @@ class QueryResult:
     anchors: dict = field(default_factory=dict)
     calls: list[str] = field(default_factory=list)
     called_by: list[str] = field(default_factory=list)
+    analysis_warnings: list[str] = field(default_factory=list)
 
     @property
     def lines(self) -> str:
@@ -72,9 +73,11 @@ class CodebaseMemory:
         return cls(graph_from_json(data))
 
     def save(self, graph_path: Path | str) -> None:
-        Path(graph_path).write_text(
-            json.dumps(graph_to_json(self.graph), indent=2), encoding="utf-8"
-        )
+        from .semantic_state import atomic_write_json
+
+        graph_path = Path(graph_path)
+        graph_path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(graph_path, graph_to_json(self.graph))
 
     # -- intent query -----------------------------------------------------
 
@@ -154,6 +157,7 @@ class CodebaseMemory:
             anchors=attrs.get("anchors") or {},
             calls=calls,
             called_by=called_by,
+            analysis_warnings=list(attrs.get("analysis_warnings") or []),
         )
 
     # -- structural helpers ------------------------------------------------

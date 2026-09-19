@@ -26,4 +26,4 @@ cms = "cms.cli:app"
 packages = ["cms", "cms.sentinel"]
 
 [tool.setuptools.package-data]
-cms = ["ui_assets/*.html"]
+cms = ["ui_assets/*.html", "ui_assets/*.js", "ui_assets/*.css", "builtin_skills/*", "builtin_skills/.versions/**/*"]

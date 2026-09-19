@@ -12,6 +12,7 @@ import os
 import secrets
 import sys
 import threading
+import time
 import webbrowser
 from dataclasses import asdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -52,8 +53,11 @@ class _MemoryCache:
 
 # @memory:feature:MemoryViewer
 # @memory:summary:HTTP request handler for the viewer — serves the single-page UI and the JSON API (graph, tree, query, source with traversal guard, activity feed, prompt export, sentinel scans and findings).
-def make_handler(root: Path, cache: _MemoryCache):
+def make_handler(root: Path, cache: _MemoryCache, on_switch_root=None):
     memory_dir = root / config.MEMORY_DIR_NAME
+    project_lock = threading.Lock()
+    project_state = {"root": root, "generation": secrets.token_hex(16), "cache": cache}
+    session_token = secrets.token_urlsafe(32)
     # Decision approvals need something a local agent cannot trivially replay:
     # a per-session code printed only to the launching terminal (the human's
     # channel). Env override exists for tests/headless setups. This is the
@@ -89,37 +93,123 @@ def make_handler(root: Path, cache: _MemoryCache):
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Security-Policy", "frame-ancestors 'none'; object-src 'none'; base-uri 'none'")
+            if self.close_connection:
+                self.send_header("Connection", "close")
             self.end_headers()
             self.wfile.write(body)
 
         def _json(self, data, status: int = 200) -> None:
             self._send(status, json.dumps(data).encode("utf-8"), "application/json; charset=utf-8")
 
-        def _error(self, status: int, message: str) -> None:
-            self._json({"error": message}, status)
+        def _error(self, status: int, message: str, code: str | None = None) -> None:
+            self._json({"error": message, **({"code": code} if code else {})}, status)
+
+        def _reject_request(self, status: int, message: str, code: str | None = None) -> None:
+            """Reject before parsing, then drain a bounded body for an orderly close.
+
+            Closing with unread arriving bytes can reset the connection on Windows,
+            losing the rejection response. Never wait indefinitely for an untrusted
+            client: flush the error first, discard at most 1 MiB for 250 ms, and close.
+            """
+            self.close_connection = True
+            self._error(status, message, code)
+            self.wfile.flush()
+            if self.command != "POST" or self.headers.get("Transfer-Encoding"):
+                return
+            try:
+                remaining = min(max(int(self.headers.get("Content-Length") or 0), 0), 1024 * 1024)
+            except ValueError:
+                return
+            original_timeout = self.connection.gettimeout()
+            deadline = time.monotonic() + 0.25
+            try:
+                while remaining and time.monotonic() < deadline:
+                    self.connection.settimeout(max(0.001, deadline - time.monotonic()))
+                    chunk = self.rfile.read1(min(remaining, 65536))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            except OSError:
+                pass  # Partial or absent bodies never turn a rejection into work.
+            finally:
+                self.connection.settimeout(original_timeout)
+
+        def _request_context(self, mutation=False):
+            port = self.server.server_address[1]
+            allowed = {f"127.0.0.1:{port}", f"localhost:{port}"}
+            host = self.headers.get("Host", "").lower()
+            origin = self.headers.get("Origin")
+            if host not in allowed or (origin and origin != f"http://{host}"):
+                self._reject_request(403, "request must originate from this local Atlas viewer")
+                return False
+            with project_lock:
+                self.root = project_state["root"]
+                self.cache = project_state["cache"]
+                self.generation = project_state["generation"]
+            self.memory_dir = self.root / config.MEMORY_DIR_NAME
+            supplied = self.headers.get("X-Atlas-Project")
+            if (mutation or supplied) and supplied != self.generation:
+                self._reject_request(409, "project changed; reload this page before continuing", "project_changed")
+                return False
+            if mutation and not secrets.compare_digest(self.headers.get("X-Atlas-Session", ""), session_token):
+                self._reject_request(403, "viewer session token required")
+                return False
+            return True
+
+        def _page(self, page):
+            boot = json.dumps({"token": session_token, "project": self.generation})
+            script = f'<script>window.ATLAS_SESSION={boot};</script><script src="/assets/client.js"></script>'
+            return page.replace(b"<head>", b"<head>" + script.encode(), 1)
 
         def do_GET(self) -> None:  # noqa: N802 (http.server API)
+            if not self._request_context():
+                return
             url = urlparse(self.path)
             query = parse_qs(url.query)
             try:
-                if url.path in ("/", "/index.html"):
+                if url.path == "/api/session":
+                    self._json({"token": session_token, "project": self.generation})
+                elif url.path in ("/assets/client.js", "/assets/connections.js", "/assets/connections.css"):
+                    asset = _ASSETS_DIR / url.path.rsplit("/", 1)[1]
+                    self._send(200, asset.read_bytes(), "text/css" if asset.suffix == ".css" else "application/javascript")
+                elif url.path in ("/", "/index.html"):
                     page = (_ASSETS_DIR / "index.html").read_bytes()
-                    self._send(200, page, "text/html; charset=utf-8")
+                    self._send(200, self._page(page), "text/html; charset=utf-8")
                 elif url.path in ("/sentinel", "/sentinel.html"):
                     page = (_ASSETS_DIR / "sentinel.html").read_bytes()
-                    self._send(200, page, "text/html; charset=utf-8")
+                    self._send(200, self._page(page), "text/html; charset=utf-8")
                 elif url.path in ("/setup", "/setup.html"):
                     page = (_ASSETS_DIR / "setup.html").read_bytes()
-                    self._send(200, page, "text/html; charset=utf-8")
+                    self._send(200, self._page(page), "text/html; charset=utf-8")
+                elif url.path in ("/context", "/context.html"):
+                    page = (_ASSETS_DIR / "context.html").read_bytes()
+                    self._send(200, self._page(page), "text/html; charset=utf-8")
+                elif url.path == "/api/context/status":
+                    from .decision import status
+                    self._json(status(self.root))
+                elif url.path == "/api/context/history":
+                    from .context_selection import history
+                    self._json(history(self.root))
+                elif url.path == "/api/context/receipt":
+                    from .context_selection import get_receipt
+                    try:
+                        receipt = get_receipt(self.root, (query.get("id") or [""])[0])
+                        self._json(receipt if receipt is not None else {"error": "Context decision not found."},
+                                   200 if receipt is not None else 404)
+                    except ValueError as exc:
+                        self._error(400, str(exc))
                 elif url.path in ("/discovery", "/constellation"):
                     page = (_ASSETS_DIR / "constellation.html").read_bytes()
-                    self._send(200, page, "text/html; charset=utf-8")
+                    self._send(200, self._page(page), "text/html; charset=utf-8")
                 elif url.path in ("/library", "/library.html"):
                     page = (_ASSETS_DIR / "library.html").read_bytes()
-                    self._send(200, page, "text/html; charset=utf-8")
+                    self._send(200, self._page(page), "text/html; charset=utf-8")
                 elif url.path in ("/ideas", "/ideas.html"):
                     page = (_ASSETS_DIR / "ideas.html").read_bytes()
-                    self._send(200, page, "text/html; charset=utf-8")
+                    self._send(200, self._page(page), "text/html; charset=utf-8")
                 elif url.path == "/api/fusion":
                     from .fuse import fusion_history, fusion_staleness, load_fusion
 
@@ -145,10 +235,10 @@ def make_handler(root: Path, cache: _MemoryCache):
                     if sid:
                         from .chat import session_history
 
-                        self._json({"transcript": session_history(root, sid, limit=50)})
+                        self._json({"transcript": session_history(self.root, sid, limit=50)})
                     else:
-                        self._json({"sessions": list_sessions(root),
-                                    "transcript": load_transcript(root)})
+                        self._json({"sessions": list_sessions(self.root),
+                                    "transcript": load_transcript(self.root)})
                 elif url.path == "/api/projects":
                     from . import semantic_state as sstate
                     from .fuse import load_registry
@@ -162,7 +252,7 @@ def make_handler(root: Path, cache: _MemoryCache):
                         out.append({
                             "name": meta.get("name") or proj.name,
                             "root": root_str,
-                            "current": proj.resolve() == root.resolve(),
+                            "current": proj.resolve() == self.root.resolve(),
                             "pipeline": sstate.pipeline_status(st)["status"],
                             "last_built": meta.get("last_built"),
                         })
@@ -188,7 +278,7 @@ def make_handler(root: Path, cache: _MemoryCache):
                     self._scope_get()
                 elif url.path == "/api/sources":
                     from .sources import analyze_sources
-                    self._json(analyze_sources(root))
+                    self._json(analyze_sources(self.root))
                 elif url.path == "/api/build-status":
                     self._json(dict(build_state))
                 elif url.path == "/api/sentinel/latest":
@@ -198,11 +288,11 @@ def make_handler(root: Path, cache: _MemoryCache):
                 elif url.path == "/api/sentinel/export":
                     self._sentinel_export(query)
                 elif url.path == "/api/graph":
-                    self._serve_memory_file("graph.json")
+                    self._graph()
                 elif url.path == "/api/tree":
                     self._serve_memory_file("clean_tree.json")
                 elif url.path == "/api/meta":
-                    self._json({"project": root.name, "root": str(root),
+                    self._json({"project": self.root.name, "root": str(self.root),
                                 "flags": config.flags(),
                                 "stale": _newest_code_mtime() > _boot_code_mtime + 1.0})
                 elif url.path == "/api/semantic":
@@ -231,7 +321,7 @@ def make_handler(root: Path, cache: _MemoryCache):
                 elif url.path == "/api/decisions":
                     from .decisions import DecisionStore
 
-                    store = DecisionStore(memory_dir, root=root)
+                    store = DecisionStore(self.memory_dir, root=self.root)
                     self._json({"decisions": store.list(
                         feature=(query.get("feature") or [None])[0],
                         active_only=(query.get("active") or ["0"])[0] == "1")})
@@ -276,11 +366,34 @@ def make_handler(root: Path, cache: _MemoryCache):
                 self._error(500, f"{type(exc).__name__}: {exc}")
 
         def do_POST(self) -> None:  # noqa: N802 (http.server API)
+            if not self._request_context(mutation=True):
+                return
             url = urlparse(self.path)
             try:
                 length = int(self.headers.get("Content-Length") or 0)
+                if length < 0 or length > 1024 * 1024 or self.headers.get("Transfer-Encoding"):
+                    self._reject_request(413, "request body must be at most 1 MiB")
+                    return
+                if self.headers.get("Content-Type", "").split(";")[0].strip() != "application/json":
+                    self._reject_request(415, "application/json required")
+                    return
                 body = json.loads(self.rfile.read(length) or b"{}") if length else {}
-                if url.path == "/api/sentinel/scan":
+                if not isinstance(body, dict):
+                    self._error(400, "JSON object required")
+                    return
+                if url.path == "/api/context/preview":
+                    memory = self.cache.get()
+                    if memory is None:
+                        self._error(404, "No graph.json; map this project first.")
+                        return
+                    from .context_selection import select_context
+                    try:
+                        selected = select_context(memory, self.root, body.get("query"),
+                                                  body.get("top_k", 8), source="human_preview")
+                        self._json(selected.to_dict())
+                    except ValueError as exc:
+                        self._error(400, str(exc))
+                elif url.path == "/api/sentinel/scan":
                     self._sentinel_scan()
                 elif url.path == "/api/sentinel/finding":
                     self._sentinel_finding(body)
@@ -334,7 +447,7 @@ def make_handler(root: Path, cache: _MemoryCache):
                     self._switch_root(body)
                 elif url.path == "/api/ignore-add":
                     from .sources import add_ignore_pattern
-                    ok = add_ignore_pattern(root, str(body.get("pattern") or ""))
+                    ok = add_ignore_pattern(self.root, str(body.get("pattern") or ""))
                     self._json({"added": ok, "pattern": str(body.get("pattern") or "")})
                 elif url.path == "/api/scout/status":
                     from .scout import ScoutError, set_suggestion_status
@@ -354,16 +467,17 @@ def make_handler(root: Path, cache: _MemoryCache):
 
                     sid = str(body.get("session") or "default")
                     try:
-                        entry = ask(root, str(body.get("question") or ""),
+                        entry = ask(self.root, str(body.get("question") or ""),
                                     get_provider(None),
-                                    history=session_history(root, sid),
+                                    history=session_history(self.root, sid),
                                     session=sid)
-                        log_activity(memory_dir, "ask_codebase",
+                        log_activity(self.memory_dir, "ask_codebase",
                                      entry["evidence_nodes"],
                                      label=entry["q"][:120])
                         self._json({"answer": entry["a"],
                                     "evidence_nodes": entry["evidence_nodes"],
                                     "matched_features": entry["matched_features"],
+                                    "context_selection": entry.get("context_selection"),
                                     "model": entry["model"]})
                     except ChatError as exc:
                         self._json({"error": str(exc)}, 400)
@@ -394,7 +508,7 @@ def make_handler(root: Path, cache: _MemoryCache):
                     from .providers import get_provider
 
                     try:
-                        self._json(rewrite_batch(root, str(body.get("level") or ""),
+                        self._json(rewrite_batch(self.root, str(body.get("level") or ""),
                                                  body.get("items") or [],
                                                  get_provider(None)))
                     except LensError as exc:
@@ -403,12 +517,12 @@ def make_handler(root: Path, cache: _MemoryCache):
                     from .explain import ExplainError, explain_nodes
                     from .providers import get_provider
 
-                    memory = cache.get()
+                    memory = self.cache.get()
                     if memory is None:
                         self._error(404, "graph.json not found — run `cms run-all` first")
                         return
                     try:
-                        self._json(explain_nodes(root, memory.graph,
+                        self._json(explain_nodes(self.root, memory.graph,
                                                  body.get("items") or [],
                                                  get_provider(None),
                                                  force=bool(body.get("force"))))
@@ -464,6 +578,9 @@ def make_handler(root: Path, cache: _MemoryCache):
             from .ideas import IdeaError, default_journal
 
             journal = default_journal()
+            if path == "/api/ideas/candidate" and body.get("verdict") in ("accepted", "merged") and not secrets.compare_digest(str(body.get("token") or ""), approval_token):
+                self._error(403, "session approval code required to promote or merge ideas")
+                return
             try:
                 if path == "/api/ideas/capture":
                     result = {"idea": journal.create_idea(
@@ -486,6 +603,8 @@ def make_handler(root: Path, cache: _MemoryCache):
                         source_type=str(body.get("source_type") or "brainstorm"),
                         title=str(body.get("title") or ""), uri=str(body.get("uri") or ""),
                         actor_kind="human")}
+                elif path == "/api/ideas/relationship/delete":
+                    result = {"removed": journal.remove_relationship(str(body.get("id") or ""))}
                 elif path == "/api/ideas/relationship":
                     result = {"relationship": journal.add_relationship(
                         str(body.get("idea_id") or ""), str(body.get("target_type") or ""),
@@ -528,7 +647,7 @@ def make_handler(root: Path, cache: _MemoryCache):
         def _sentinel_store(self):
             from .sentinel.store import SentinelStore
 
-            return SentinelStore(memory_dir)
+            return SentinelStore(self.memory_dir)
 
         def _sentinel_latest(self) -> None:
             store = self._sentinel_store()
@@ -546,13 +665,15 @@ def make_handler(root: Path, cache: _MemoryCache):
                     return
                 sentinel_state.update(running=True, error="")
 
+            scan_root = self.root
+
             def worker() -> None:
                 import time as _time
 
                 try:
                     from .sentinel.runner import run_scan
 
-                    run_scan(root)
+                    run_scan(scan_root)
                 except Exception as exc:
                     sentinel_state["error"] = f"{type(exc).__name__}: {exc}"
                 finally:
@@ -596,36 +717,39 @@ def make_handler(root: Path, cache: _MemoryCache):
             from .scope import build_dir_tree, load_scope
 
             self._json({
-                "project": root.name,
-                "root": str(root),
-                "tree": build_dir_tree(root),
-                "scope": sorted(load_scope(root) or []),
-                "has_memory": (memory_dir / "graph.json").is_file(),
+                "project": self.root.name,
+                "root": str(self.root),
+                "tree": build_dir_tree(self.root),
+                "scope": sorted(load_scope(self.root) or []),
+                "has_memory": (self.memory_dir / "graph.json").is_file(),
             })
 
         def _scope_get(self) -> None:
             from .scope import load_scope
 
-            self._json({"include": sorted(load_scope(root) or [])})
+            self._json({"include": sorted(load_scope(self.root) or [])})
 
         def _scope_set(self, body: dict) -> None:
             from .scope import clear_scope, save_scope
 
             include = [str(x) for x in (body.get("include") or [])]
             if include:
-                save_scope(root, include)
+                save_scope(self.root, include)
             else:
-                clear_scope(root)
+                clear_scope(self.root)
             self._json({"saved": True, "count": len(include)})
 
-        def _kick_build(self, full: bool) -> bool:
+        def _kick_build(self, full: bool, target_root=None) -> bool:
             """Start a background pipeline build for the CURRENT root. Returns
             False if one is already running."""
+            target_root = target_root or self.root
             with build_lock:
                 if build_state["running"]:
+                    if build_state.get("root") != str(target_root):
+                        build_state["pending"] = (str(target_root), full)
+                        return True
                     return False
-                build_state.update(running=True, error="", message="starting…")
-            target_root = root  # snapshot (root may be rebound by a later switch)
+                build_state.update(running=True, error="", message="starting…", root=str(target_root))
 
             def worker() -> None:
                 import time as _time
@@ -649,7 +773,11 @@ def make_handler(root: Path, cache: _MemoryCache):
                 except Exception as exc:
                     build_state["error"] = f"{type(exc).__name__}: {exc}"
                 finally:
-                    build_state.update(running=False, finished_at=_time.time(), message=done_msg)
+                    with build_lock:
+                        pending = build_state.pop("pending", None)
+                        build_state.update(running=False, finished_at=_time.time(), message=done_msg)
+                    if pending:
+                        self._kick_build(pending[1], target_root=Path(pending[0]))
 
             threading.Thread(target=worker, daemon=True, name="cms-build").start()
             return True
@@ -665,13 +793,13 @@ def make_handler(root: Path, cache: _MemoryCache):
 
             from .bundle import default_bundle_name, export_bundle
 
-            if not (memory_dir / "graph.json").is_file():
+            if not (self.memory_dir / "graph.json").is_file():
                 self._error(409, "no memory yet — build it first")
                 return
             include_source = bool(body.get("include_source"))
-            tmp = Path(tempfile.gettempdir()) / default_bundle_name(root)
+            tmp = Path(tempfile.gettempdir()) / default_bundle_name(self.root)
             try:
-                out = export_bundle(root, out_path=tmp, include_source=include_source)
+                out = export_bundle(self.root, out_path=tmp, include_source=include_source)
             except Exception as exc:
                 self._error(500, f"{type(exc).__name__}: {exc}")
                 return
@@ -694,7 +822,6 @@ def make_handler(root: Path, cache: _MemoryCache):
 
         def _switch_root(self, body: dict) -> None:
             """Point this running server at a different codebase (live rebind)."""
-            nonlocal root, memory_dir, cache
             from .scanner import scan
 
             path = str(body.get("path") or "").strip().strip('"').strip("'")
@@ -709,27 +836,35 @@ def make_handler(root: Path, cache: _MemoryCache):
             if not scan(new_root):
                 self._error(400, "no recognisable source files in that folder")
                 return
-            root = new_root
-            memory_dir = root / config.MEMORY_DIR_NAME
-            cache = _MemoryCache(memory_dir / "graph.json")
+            with project_lock:
+                if self.generation != project_state["generation"]:
+                    self._error(409, "project changed; reload before switching", "project_changed")
+                    return
+                project_state.update(root=new_root, generation=secrets.token_hex(16),
+                                     cache=_MemoryCache(new_root / config.MEMORY_DIR_NAME / "graph.json"))
+            self.root = new_root
+            if on_switch_root:
+                on_switch_root(new_root)
+            self.memory_dir = self.root / config.MEMORY_DIR_NAME
+            self.cache = _MemoryCache(self.memory_dir / "graph.json")
             try:
                 from .app import _save_workspace_root
-                _save_workspace_root(root)  # persist so relaunch stays on this codebase
+                _save_workspace_root(self.root)  # persist so relaunch stays on this codebase
             except Exception:
                 pass
             # process the new codebase now — no restart needed. Incremental: cheap
             # if already current, full build if it has no (or stale) memory.
             building = self._kick_build(full=False)
             self._json({
-                "switched": True, "project": root.name, "root": str(root),
-                "has_memory": (memory_dir / "graph.json").is_file(),
+                "switched": True, "project": self.root.name, "root": str(self.root),
+                "has_memory": (self.memory_dir / "graph.json").is_file(),
                 "building": building,
             })
 
         def _notes_store(self):
             from .notes import NotesStore
 
-            return NotesStore(memory_dir)
+            return NotesStore(self.memory_dir)
 
         def _notes_list(self, query: dict) -> None:
             path = (query.get("path") or [""])[0]
@@ -772,7 +907,7 @@ def make_handler(root: Path, cache: _MemoryCache):
         def _ann_store(self):
             from .annotations import AnnotationStore
 
-            return AnnotationStore(memory_dir, root=root)
+            return AnnotationStore(self.memory_dir, root=self.root)
 
         def _annotations_list(self, query: dict) -> None:
             store = self._ann_store()
@@ -839,12 +974,12 @@ def make_handler(root: Path, cache: _MemoryCache):
         def _fidelity(self, query: dict) -> None:
             from .fidelity import intent_fidelity
 
-            memory = cache.get()
+            memory = self.cache.get()
             if memory is None:
                 self._error(404, "graph.json not found — run `cms run-all` first")
                 return
             try:
-                self._json(intent_fidelity(root, memory.graph,
+                self._json(intent_fidelity(self.root, memory.graph,
                                            (query.get("feature") or [""])[0]))
             except ValueError as exc:
                 self._error(400, str(exc))
@@ -853,12 +988,12 @@ def make_handler(root: Path, cache: _MemoryCache):
             from .feature_discovery import FeatureDiscoveryError, propose_feature
             from .providers import get_provider
 
-            memory = cache.get()
+            memory = self.cache.get()
             if memory is None:
                 self._error(404, "graph.json not found — run `cms run-all` first")
                 return
             try:
-                self._json(propose_feature(root, memory,
+                self._json(propose_feature(self.root, memory,
                                            str(body.get("description") or ""),
                                            get_provider(None)))
             except FeatureDiscoveryError as exc:
@@ -868,7 +1003,7 @@ def make_handler(root: Path, cache: _MemoryCache):
             from .feature_discovery import FeatureDiscoveryError, confirm_feature
 
             try:
-                self._json(confirm_feature(root, str(body.get("name") or ""),
+                self._json(confirm_feature(self.root, str(body.get("name") or ""),
                                            str(body.get("description") or ""),
                                            body.get("members") or []))
             except FeatureDiscoveryError as exc:
@@ -877,12 +1012,12 @@ def make_handler(root: Path, cache: _MemoryCache):
         def _flowreview_get(self, query: dict) -> None:
             from .flowreview import FlowReviewError, read_flow_review
 
-            memory = cache.get()
+            memory = self.cache.get()
             if memory is None:
                 self._error(404, "graph.json not found — run `cms run-all` first")
                 return
             try:
-                stored = read_flow_review(root, memory.graph,
+                stored = read_flow_review(self.root, memory.graph,
                                           (query.get("feature") or [""])[0])
             except FlowReviewError as exc:
                 self._error(400, str(exc))
@@ -893,24 +1028,24 @@ def make_handler(root: Path, cache: _MemoryCache):
             from .flowreview import FlowReviewError, build_flow_review
             from .providers import get_provider
 
-            memory = cache.get()
+            memory = self.cache.get()
             if memory is None:
                 self._error(404, "graph.json not found — run `cms run-all` first")
                 return
             try:
-                review = build_flow_review(root, memory.graph, get_provider(None),
+                review = build_flow_review(self.root, memory.graph, get_provider(None),
                                            str(body.get("feature") or ""),
                                            force=bool(body.get("force")))
             except FlowReviewError as exc:
                 self._error(400, str(exc))
                 return
-            memory.save(memory_dir / "graph.json")  # persist onto the feature node
+            memory.save(self.memory_dir / "graph.json")  # persist onto the feature node
             self._json({"review": review})
 
         def _decisions_post(self, path: str, body: dict) -> None:
             from .decisions import DecisionStore
 
-            store = DecisionStore(memory_dir, root=root)
+            store = DecisionStore(self.memory_dir, root=self.root)
             try:
                 if path.endswith(("/approve", "/close")):
                     # Human-authority gate: approving and closing/rejecting both
@@ -951,10 +1086,10 @@ def make_handler(root: Path, cache: _MemoryCache):
             def one(key):
                 return (query.get(key) or [None])[0] or None
 
-            view = LibraryView(root)
+            view = LibraryView(self.root)
             rows = view.list(type=one("type"), tag=one("tag"),
                              status=one("status"), scope=one("scope"), q=one("q"))
-            summaries = LibraryUsageStore(memory_dir).summaries()
+            summaries = LibraryUsageStore(self.memory_dir).summaries()
             for row in rows:
                 row["evidence"] = summaries.get(
                     row["id"], {"uses": 0, "human": {"ratings": 0}})
@@ -969,19 +1104,19 @@ def make_handler(root: Path, cache: _MemoryCache):
             raw_version = (query.get("version") or [""])[0]
             try:
                 version = int(raw_version) if raw_version else None
-                asset = LibraryView(root).get(asset_id, version)
+                asset = LibraryView(self.root).get(asset_id, version)
             except (LibraryError, ValueError) as exc:
                 self._error(404, str(exc))
                 return
             annotations = []
             try:
                 from .annotations import AnnotationStore
-                annotations = AnnotationStore(memory_dir, root=root).list(
+                annotations = AnnotationStore(self.memory_dir, root=self.root).list(
                     target=f"asset:{asset_id}")
             except Exception:
                 pass
             self._json({"asset": asset, "annotations": annotations,
-                        "evidence": LibraryUsageStore(memory_dir).summary(asset_id)})
+                        "evidence": LibraryUsageStore(self.memory_dir).summary(asset_id)})
 
         def _library_export(self, query: dict) -> None:
             from .library import LibraryError, export_asset
@@ -990,7 +1125,7 @@ def make_handler(root: Path, cache: _MemoryCache):
             raw_version = (query.get("version") or [""])[0]
             try:
                 version = int(raw_version) if raw_version else None
-                text = export_asset(root, asset_id, version)
+                text = export_asset(self.root, asset_id, version)
             except (LibraryError, ValueError) as exc:
                 self._error(404, str(exc))
                 return
@@ -1012,7 +1147,7 @@ def make_handler(root: Path, cache: _MemoryCache):
             try:
                 if path.endswith("/rating"):
                     from .library_usage import LibraryUsageStore
-                    rated = LibraryUsageStore(memory_dir).rate(
+                    rated = LibraryUsageStore(self.memory_dir).rate(
                         str(body.get("use_id") or ""), rating=body.get("rating"),
                         effectiveness=body.get("effectiveness"),
                         efficiency=body.get("efficiency"), comment=body.get("comment"),
@@ -1023,7 +1158,7 @@ def make_handler(root: Path, cache: _MemoryCache):
                 if path.endswith("/compose"):
                     selection = [str(r) for r in (body.get("selection") or [])]
                     self._json(compose_context(
-                        root, selection,
+                        self.root, selection,
                         include_drafts=bool(body.get("include_drafts"))))
                     return
 
@@ -1037,7 +1172,7 @@ def make_handler(root: Path, cache: _MemoryCache):
                                          "in the terminal that launched Atlas")
                         return
 
-                view = LibraryView(root)
+                view = LibraryView(self.root)
                 store = view.store(scope)
                 if path.endswith("/publish"):
                     rec = store.publish(str(body.get("id") or ""),
@@ -1059,13 +1194,13 @@ def make_handler(root: Path, cache: _MemoryCache):
                         created_by={"kind": "user", "identity": "viewer", "via": "http"})
                 elif path.endswith("/import-directory"):
                     result = import_skill_directory(
-                        root, str(body.get("directory") or ""), scope=scope,
+                        self.root, str(body.get("directory") or ""), scope=scope,
                         source_name=str(body.get("source_name") or ""),
                         created_by={"kind": "user", "identity": "viewer", "via": "http"})
                     self._json(result)
                     return
                 elif path.endswith("/import"):
-                    rec = import_asset(root, str(body.get("content") or ""),
+                    rec = import_asset(self.root, str(body.get("content") or ""),
                                        scope=scope,
                                        filename=str(body.get("filename") or ""),
                                        created_by={"kind": "user", "identity": "viewer",
@@ -1092,7 +1227,7 @@ def make_handler(root: Path, cache: _MemoryCache):
             self._json({"asset": rec})
 
         def _serve_memory_file(self, name: str) -> None:
-            path = memory_dir / name
+            path = self.memory_dir / name
             if not path.is_file():
                 self._error(404, f"{name} not found — run `cms run-all` first")
                 return
@@ -1105,9 +1240,9 @@ def make_handler(root: Path, cache: _MemoryCache):
             from . import semantic_state as sstate
             from .providers import provider_identity
 
-            state = sstate.load_state(memory_dir)
+            state = sstate.load_state(self.memory_dir)
             payload = {
-                "project": root.name, "root": str(root),
+                "project": self.root.name, "root": str(self.root),
                 "schema_version": state.get("schema_version"),
                 "stages": {name: sstate.stage(state, name) for name in sstate.STAGES},
                 "pipeline": sstate.pipeline_status(state),
@@ -1119,7 +1254,7 @@ def make_handler(root: Path, cache: _MemoryCache):
                 payload["provider"] = provider_identity(None)
             except Exception:
                 payload["provider"] = {"name": "unavailable", "model": None, "real": False}
-            memory = cache.get()
+            memory = self.cache.get()
             if memory is not None:
                 payload["counts"] = sstate.feature_counts(memory.graph)
                 payload["live"] = sstate.derive_staleness(state, memory.graph)
@@ -1132,7 +1267,7 @@ def make_handler(root: Path, cache: _MemoryCache):
             if not text:
                 self._json({"results": []})
                 return
-            memory = cache.get()
+            memory = self.cache.get()
             if memory is None:
                 self._error(404, "no graph.json — run `cms run-all` first")
                 return
@@ -1147,7 +1282,7 @@ def make_handler(root: Path, cache: _MemoryCache):
             if not target:
                 self._json({"error": "no target given"}, 400)
                 return
-            memory = cache.get()
+            memory = self.cache.get()
             if memory is None:
                 self._json({"error": "no graph.json — run `cms run-all` first"}, 404)
                 return
@@ -1167,14 +1302,14 @@ def make_handler(root: Path, cache: _MemoryCache):
         def _drift(self, query: dict) -> None:
             """Per-anchor intent integrity, computed from current source and graph evidence."""
             target = (query.get("target") or [""])[0].strip() or None
-            memory = cache.get()
+            memory = self.cache.get()
             if memory is None:
                 self._json({"error": "no graph.json — run `cms run-all` first"}, 404)
                 return
             from .anchor_drift import detect_anchor_drift
 
             try:
-                report = detect_anchor_drift(memory.graph, root, target=target)
+                report = detect_anchor_drift(memory.graph, self.root, target=target)
             except ValueError as exc:
                 self._json({"error": str(exc)}, 404)
                 return
@@ -1186,7 +1321,7 @@ def make_handler(root: Path, cache: _MemoryCache):
             if not feature:
                 self._json({"error": "select a feature first, then run verify"}, 400)
                 return
-            memory = cache.get()
+            memory = self.cache.get()
             if memory is None:
                 self._json({"error": "no graph.json — run `cms run-all` first"}, 404)
                 return
@@ -1204,15 +1339,17 @@ def make_handler(root: Path, cache: _MemoryCache):
                             "message": "No tests are mapped to this feature yet — run "
                                        "`cms verify` (no args) to collect coverage first."})
                 return
-            from .verify import verify_feature
+            from .verify import build_verification_result, verify_feature
 
-            passed, output = verify_feature(root, tests)
+            passed, output = verify_feature(self.root, tests)
+            memory.graph.nodes[matches[0]["id"]]["verify_result"] = build_verification_result(self.root, tests, passed)
+            memory.save(self.memory_dir / "graph.json")
             self._json({"feature": name, "ran": True, "passed": passed,
                         "tests": tests, "output": output})
 
         def _align(self, body: dict) -> None:
             """Capture intent and verdict the working diff against it."""
-            memory = cache.get()
+            memory = self.cache.get()
             if memory is None:
                 self._json({"error": "no graph.json — run `cms run-all` first"}, 404)
                 return
@@ -1222,9 +1359,9 @@ def make_handler(root: Path, cache: _MemoryCache):
             goal = str(body.get("goal") or "").strip() or None
             base = str(body.get("base") or "HEAD") or "HEAD"
             scan = bool(body.get("scan"))
-            pack = capture_intent(root, goal=goal, base=base)
-            record = build_alignment(memory, root, pack, base=base, scan=scan)
-            AlignStore(memory_dir).save_alignment(record)
+            pack = capture_intent(self.root, goal=goal, base=base)
+            record = build_alignment(memory, self.root, pack, base=base, scan=scan)
+            AlignStore(self.memory_dir).save_alignment(record)
             self._json(record)
 
         def _activity(self, query: dict) -> None:
@@ -1233,7 +1370,7 @@ def make_handler(root: Path, cache: _MemoryCache):
             from .activity import read_activity
 
             since = float((query.get("since") or ["0"])[0])
-            self._json({"now": _time.time(), "events": read_activity(memory_dir, since)})
+            self._json({"now": _time.time(), "events": read_activity(self.memory_dir, since)})
 
         def _prompt(self, query: dict) -> None:
             from .prompt_export import export_prompt
@@ -1243,18 +1380,46 @@ def make_handler(root: Path, cache: _MemoryCache):
                 self._error(400, "task parameter required")
                 return
             as_json = (query.get("format") or [""])[0] == "json"
-            content, out = export_prompt(root, task, as_json=as_json)
+            # A navigation/embedded GET must not trigger optional cloud work.
+            # Authenticated viewer fetches carry the session; explicit preview
+            # and Ask Atlas use the protected POST path.
+            cloud_allowed = secrets.compare_digest(self.headers.get("X-Atlas-Session", ""), session_token)
+            content, out = export_prompt(self.root, task, as_json=as_json, allow_remote=cloud_allowed)
             content_type = "application/json" if as_json else "text/plain"
             self._send(200, content.encode("utf-8"), f"{content_type}; charset=utf-8")
 
+        def _graph(self) -> None:
+            path = self.memory_dir / "graph.json"
+            if not path.is_file():
+                self._error(404, "no graph.json — build memory first")
+                return
+            from .verify import behavioral_status, coverage_is_current, verification_input_hash, verification_status
+            data = json.loads(path.read_text(encoding="utf-8"))
+            fingerprint = verification_input_hash(self.root)
+            memory = self.cache.get()
+            coverage_current = bool(memory and coverage_is_current(self.root, memory.graph, input_hash=fingerprint))
+            for node in data.get("nodes", []):
+                if node.get("type") == "feature":
+                    node["verification_state"] = verification_status(self.root, node.get("verify_result"), input_hash=fingerprint)
+                    node["behavioral_state"] = behavioral_status(self.root, node.get("behavioral_evidence"), input_hash=fingerprint)
+                    node["coverage_current"] = coverage_current
+            self._json(data)
+
         def _source(self, query: dict) -> None:
             rel = (query.get("path") or [""])[0]
-            target = (root / rel).resolve()
-            if root not in target.parents:
+            target = (self.root / rel).resolve()
+            if self.root not in target.parents:
                 self._error(403, "path outside project root")
                 return
             if target.suffix.lower() not in LANGUAGE_BY_EXTENSION or not target.is_file():
                 self._error(404, "not a scanned source file")
+                return
+            from .scanner import scan
+            memory = self.cache.get()
+            allowed = {record.rel_path for record in scan(self.root)}
+            canonical = target.relative_to(self.root).as_posix()
+            if canonical not in allowed or memory is None or "file:" + canonical not in memory.graph:
+                self._error(403, "source is outside the current mapped processing scope")
                 return
             text = target.read_text(encoding="utf-8", errors="replace")
             self._json({"path": rel, "text": text})
@@ -1266,10 +1431,10 @@ def make_handler(root: Path, cache: _MemoryCache):
 # @memory:feature:MemoryViewer
 # @memory:connects:QueryEngine, GitHistoryLayer, ActivityPulse, FeatureTracing
 # @memory:summary:Local web UI — explorer, force-directed knowledge graph with heat overlay and MCP pulses, inspector with summaries/anchors/flows, intent search.
-def serve(root: Path, port: int = 7717, open_browser: bool = True, open_path: str = "/") -> None:
+def serve(root: Path, port: int = 7717, open_browser: bool = True, open_path: str = "/", on_switch_root=None) -> None:
     root = root.resolve()
     cache = _MemoryCache(root / config.MEMORY_DIR_NAME / "graph.json")
-    handler = make_handler(root, cache)
+    handler = make_handler(root, cache, on_switch_root=on_switch_root)
     server = ThreadingHTTPServer(("127.0.0.1", port), handler)
     url = f"http://127.0.0.1:{port}"
     print(f"CMS UI serving {root.name} at {url}  (Ctrl+C to stop)")

@@ -154,7 +154,11 @@ def query(
         typer.echo(f"No memory found at {graph_path}. Run `cms run-all` first.", err=True)
         raise typer.Exit(1)
     mem = CodebaseMemory.load(graph_path)
-    results = mem.query_intent(text, top_k=top_k)
+    from .context_selection import select_context
+    selection = select_context(mem, root, text, top_k=top_k, source="cli_query")
+    results = selection.hits
+    typer.echo(f"Context: {selection.receipt['status']} — {selection.receipt['reason']}")
+    typer.echo(f"Receipt: {selection.receipt['id']} (inspect in Atlas's Context decisions screen)")
     if not results:
         typer.echo("No matches.")
         return
@@ -170,6 +174,62 @@ def query(
             typer.echo(f"     calls: {', '.join(hit.calls[:5])}")
         if hit.called_by:
             typer.echo(f"     called by: {', '.join(hit.called_by[:5])}")
+
+
+@app.command("context")
+def context_preview(
+    text: str = typer.Argument(None, help="Task to preview; omit to inspect settings and recent decisions."),
+    root: Path = RootOption,
+    top_k: int = typer.Option(8, "--top-k", "-k", min=1, max=50),
+    receipt: str = typer.Option(None, "--receipt", help="Inspect a saved context decision."),
+) -> None:
+    """Inspect context selection as JSON; respects the project's Jev policy."""
+    from .context_selection import get_receipt, history, select_context
+    from .decision import status
+    root = root.resolve()
+    try:
+        if receipt:
+            payload = get_receipt(root, receipt)
+            if payload is None:
+                raise ValueError("Context decision not found in retained history.")
+        elif text:
+            graph_path = _memory_dir(root) / "graph.json"
+            if not graph_path.is_file():
+                raise ValueError("No graph.json; run cms run-all first.")
+            payload = select_context(CodebaseMemory.load(graph_path), root, text, top_k,
+                                     source="cli_preview").to_dict()
+        else:
+            payload = {"settings": status(root), "items": history(root)["items"][:10]}
+        typer.echo(json.dumps(payload, ensure_ascii=False, indent=2))
+    except (ValueError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
+
+
+@app.command("context-evaluate")
+def context_evaluate(
+    cases: Path = typer.Argument(..., exists=True, dir_okay=False, help="JSON list of independently labelled retrieval cases."),
+    root: Path = RootOption,
+    top_k: int = typer.Option(5, "--top-k", "-k", min=1, max=50),
+    out: Path = typer.Option(None, "--out", help="Optional report path; otherwise prints JSON."),
+) -> None:
+    """Compare local and assisted retrieval under current project settings."""
+    from .context_evaluation import evaluate
+    from .storage import atomic_write_json
+    try:
+        if cases.stat().st_size > 1024 * 1024:
+            raise ValueError("Evaluation input must be at most 1 MiB.")
+        if out and out.resolve() == cases.resolve():
+            raise ValueError("The report must not overwrite the evaluation labels.")
+        report = evaluate(root, json.loads(cases.read_text(encoding="utf-8")), top_k)
+        if out:
+            atomic_write_json(out, report)
+            typer.echo(f"Retrieval diagnostic saved to {out}. This does not measure coding effectiveness.")
+        else:
+            typer.echo(json.dumps(report, ensure_ascii=False, indent=2))
+    except (ValueError, OSError) as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1) from exc
 
 
 @app.command()
@@ -360,7 +420,7 @@ def verify(
     refresh: bool = typer.Option(False, "--refresh", help="Ignore cached coverage and collect it again."),
 ) -> None:
     """Map tests to features via coverage, or run tests that exercise one feature."""
-    from .verify import map_tests_to_features, run_coverage, verify_feature
+    from .verify import build_verification_result, coverage_is_current, map_tests_to_features, run_coverage, verify_feature
 
     root = root.resolve()
     graph_path = _memory_dir(root) / "graph.json"
@@ -383,20 +443,18 @@ def verify(
         typer.echo(f"Running {len(tests)} test(s) mapped as exercising {matches[0]['name']}:")
         for t in tests:
             typer.echo(f"  - {t}")
+        if not coverage_is_current(root, mem.graph):
+            typer.echo("Mapping is historical or unbound; rerunning these candidates does not refresh execution coverage.")
         passed, output = verify_feature(root, tests)
         # persist the outcome as durable evidence (intent-fidelity input)
-        import time as _time
-
-        mem.graph.nodes[f"feature:{matches[0]['name']}"]["verify_result"] = {
-            "passed": passed, "tests": len(tests),
-            "at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
-        }
+        mem.graph.nodes[f"feature:{matches[0]['name']}"]["verify_result"] = build_verification_result(root, tests, passed)
         mem.save(graph_path)
         typer.echo("\n" + output)
         if passed:
             typer.echo(
-                "\nPASS — all mapped tests passed; coverage proves these tests executed "
-                "the feature, not that every intended behaviour is specified or correct"
+                "\nPASS — selected tests passed. Current coverage proves these tests executed "
+                "the feature only when mapping is current; this does not prove every intended behaviour. "
+                "Use `cms verify-plan <plan.json>` for explicit requirement-to-test links."
             )
         else:
             typer.echo("\nFAIL — one or more tests mapped to this feature failed")
@@ -413,6 +471,25 @@ def verify(
     typer.echo("Saved to graph. Try:  cms verify <FeatureName>")
 
 
+@app.command("verify-plan")
+def verify_plan(plan: Path = typer.Argument(..., help="JSON goal/features/criteria/test_ids plan."),
+                root: Path = RootOption) -> None:
+    """Execute declared behavioral criteria using explicitly selected local pytest tests."""
+    import json
+    from .verify import run_verification_plan
+    root = root.resolve()
+    graph_path = _memory_dir(root) / "graph.json"
+    try:
+        mem = CodebaseMemory.load(graph_path)
+        result = run_verification_plan(root, mem.graph, json.loads(plan.read_text(encoding="utf-8")))
+        mem.save(graph_path)
+    except (OSError, ValueError) as exc:
+        typer.echo(f"Verification plan failed: {exc}", err=True)
+        raise typer.Exit(1)
+    typer.echo(json.dumps(result, indent=2))
+    raise typer.Exit(0 if result["passed"] else 1)
+
+
 @app.command()
 def flow(
     feature: str = typer.Argument(..., help="Feature whose exact execution flow to review."),
@@ -420,7 +497,7 @@ def flow(
     provider: str = typer.Option(None, "--provider", "-p", help="anthropic | openai | mock"),
     force: bool = typer.Option(False, "--force", help="Regenerate even when a current cached review exists."),
 ) -> None:
-    """Exact-flow review: evidence-classified account of how a feature executes."""
+    """Bounded static flow review with explicit execution and criterion evidence."""
     from .flowreview import FlowReviewError, build_flow_review
 
     root = root.resolve()

@@ -2,6 +2,20 @@
   "about": "Feature completion ledger audited by Hermes Sentinel (cms sentinel). Statuses: not_started | in_progress | blocked | complete.",
   "features": [
     {
+      "feature": "ContextDecisions",
+      "status": "in_progress",
+      "evidence": {
+        "files": ["cms/decision.py", "cms/context_selection.py", "cms/context_evaluation.py", "cms/prompt_export.py", "cms/chat.py", "cms/mcp.py", "cms/cli.py"],
+        "database": [".memory/context/history.json", ".memory/context/cache.json"],
+        "api": ["POST /api/context/preview", "GET /api/context/status", "GET /api/context/history", "GET /api/context/receipt", "MCP get_context_decision"],
+        "ui": ["cms/ui_assets/context.html"],
+        "tests": ["tests/test_decision.py", "tests/test_context_selection.py", "tests/test_context_surfaces.py", "tests/test_context_freshness_surfaces.py", "tests/test_context_evaluation.py", "tests/test_context_ui.cjs"],
+        "manual_verification": "Disposable browser project: explicit preview, protected target, persisted reload, exact historical receipt, changed-source warning and unsaved-receipt warning. See docs/audits/jev-integration-flow-audit.md."
+      },
+      "known_limitations": ["Optional Jev ranking is implemented and off by default; live retrieval quality, total coding effort and owner comprehension remain unmeasured.", "Relevance is advisory. Source fingerprints do not prove semantic correctness or observed runtime behavior.", "Connected intent-to-change work review remains planned; a receipt does not prove which evidence a third-party agent actually read."],
+      "last_verified": "2026-09-19"
+    },
+    {
       "feature": "IdeaJournal",
       "status": "complete",
       "evidence": {

@@ -158,6 +158,9 @@ def _wf_carry_over(tmp: Path) -> str:
     node["flow_review"] = {"status": "static_only", "content_hash": "probe",
                            "narrative": "sentinel-probe", "flows": []}
     node["verify_result"] = {"passed": True, "at": "probe", "tests": 1}
+    from ..verify import CACHE_SCHEMA, verification_input_hash
+    mem.graph.graph["coverage_evidence"] = {"schema_version": CACHE_SCHEMA,
+                                           "input_hash": verification_input_hash(root)}
     mem.save(graph_path)
 
     incremental_update(root, MockProvider(), echo=lambda *_: None)

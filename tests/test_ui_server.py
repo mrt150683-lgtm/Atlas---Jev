@@ -47,8 +47,8 @@ class _Client:
         while True:
             try:
                 conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
-                conn.request("GET", "/api/meta")
-                conn.getresponse().read()
+                conn.request("GET", "/api/session")
+                self.session = json.loads(conn.getresponse().read())
                 self.conn = conn
                 return
             except Exception:
@@ -71,7 +71,7 @@ class _Client:
 
     def post(self, path: str, payload: dict):
         body = json.dumps(payload)
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", "X-Atlas-Session": self.session["token"], "X-Atlas-Project": self.session["project"]}
         with self.lock:
             try:
                 self.conn.request("POST", path, body=body, headers=headers)
@@ -248,8 +248,11 @@ def test_switch_root_rebinds_live(tmp_path, monkeypatch) -> None:
 
     def call(method, path, body=None):
         c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        c.request("GET", "/api/session")
+        session = _json.loads(c.getresponse().read())
         c.request(method, path, body=_json.dumps(body) if body is not None else None,
-                  headers={"Content-Type": "application/json"} if body is not None else {})
+                  headers={"Content-Type": "application/json", "X-Atlas-Session": session["token"],
+                           "X-Atlas-Project": session["project"]} if body is not None else {})
         r = c.getresponse()
         status, data = r.status, r.read()
         c.close()
@@ -656,6 +659,16 @@ def test_human_view_toggle_and_resolution_slider_markup(server) -> None:
         assert token in html, f"missing {token}"
     for level in ("System", "Component", "Feature", "Module", "Function", "Source"):
         assert f'name: "{level}"' in html, f"missing level {level}"
+    # the deeper stops are authored layouts, not aliases for the generic graph
+    for token in ("buildModuleView", "buildFunctionView", "ui:feature-hull:",
+                  'shape: "module"', 'shape: sourceMode ? "source"'):
+        assert token in html, f"missing deep-resolution layout {token}"
+    assert "fixedView" in html  # force simulation must not scramble these boards
+    # Feature/component groups and module/directory lanes reserve measured
+    # dimensions; cards scale with zoom instead of retaining a collision-prone
+    # minimum screen size.
+    assert "groupMetrics" in html and "laneMetrics" in html
+    assert "const ww = wide * S.view.k" in html
     # canonical traceability: the PART_OF pyramid is indexed client-side
     assert "featComp" in html and "compSys" in html
     # deep-link + persistence contract
@@ -916,7 +929,7 @@ def test_idea_journal_page_and_human_capture_round_trip(server) -> None:
     assert json.loads(client.get(f"/api/ideas/source?id={source['id']}")[1])["source"][
         "content"] == "Raw session notes."
     status, exported = client.get("/api/ideas/export")
-    assert status == 200 and json.loads(exported)["schema_version"] == 1
+    assert status == 200 and json.loads(exported)["schema_version"] == 2
 
 
 def test_idea_candidate_decisions_are_explicit(server) -> None:
@@ -927,6 +940,9 @@ def test_idea_candidate_decisions_are_explicit(server) -> None:
         "Candidate path", "Waiting for review.", actor_kind="model")
     status, body = client.post("/api/ideas/candidate", {
         "id": candidate["id"], "verdict": "accepted"})
+    assert status == 403
+    status, body = client.post("/api/ideas/candidate", {
+        "id": candidate["id"], "verdict": "accepted", "token": APPROVAL_TOKEN})
     accepted = json.loads(body)["candidate"]
     assert status == 200 and accepted["accepted_idea_id"]
     assert default_journal().get_idea(accepted["accepted_idea_id"])["origin"] == "agent"

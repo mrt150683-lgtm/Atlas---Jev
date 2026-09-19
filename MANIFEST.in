@@ -1,0 +1,3 @@
+recursive-include skills *.md *.json
+recursive-include skills/.versions *.md *.json
+recursive-include cms/ui_assets *.html *.js *.css

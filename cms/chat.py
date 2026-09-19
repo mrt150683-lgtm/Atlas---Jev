@@ -30,6 +30,7 @@ from . import config
 from . import semantic_state as ss
 from .memory import CodebaseMemory
 from .providers import SummaryProvider
+from .prompting import EVIDENCE_RULES, evidence_json
 
 CHAT_MAX_TOKENS = 1600
 HISTORY_TURNS = 6
@@ -52,11 +53,14 @@ Hard rules:
 LIVE CLI CONTRACT:
 {cli_contract}
 
-{history_block}EVIDENCE PACK:
+{history_block}<evidence_json>
 {evidence}
+</evidence_json>
 
 OWNER'S QUESTION: {question}
 """
+
+CHAT_PROMPT += EVIDENCE_RULES
 
 
 class ChatError(RuntimeError):
@@ -129,7 +133,10 @@ def validate_answer_commands(answer: str) -> tuple[str, list[dict]]:
         if error is None:
             return match.group(0)
         invalid.append({"command": command, "error": error})
-        parts = shlex.split(command, posix=True)
+        try:
+            parts = shlex.split(command, posix=True)
+        except ValueError:
+            parts = []
         help_command = f"cms {parts[1]} --help" if len(parts) > 1 and not error.startswith("unknown command") else "cms --help"
         return (f"Atlas blocked an invalid generated command (`{command}`: {error}). "
                 f"Use `{help_command}` for the live syntax.")
@@ -155,23 +162,35 @@ def build_evidence(root: Path, question: str) -> tuple[dict, list[str]]:
     nodes: list[str] = []
     q_lower = question.lower()
 
+    from .context_selection import compact_receipt, select_context
+    selection = select_context(memory, root, question, top_k=6, source="ask_atlas")
+    context_facts = {row["id"]: row for row in selection.receipt["candidates"]}
     hits = []
-    for h in memory.query_intent(question, top_k=6):
+    for h in selection.hits:
         hits.append({"node": h.node_id, "path": h.path, "lines": h.lines,
-                     "summary": _trim(h.summary, 260)})
+                     "summary": _trim(h.summary, 260),
+                     "source_freshness": context_facts[h.node_id]["source_freshness"],
+                     "analysis_warnings": list(h.analysis_warnings)})
         nodes.append(h.node_id)
 
     feats = get_features(graph)
+    selected_features = {h.name for h in selection.hits if h.kind == "feature"}
+    for h in selection.hits:
+        for _, member_of, edge in graph.out_edges(h.node_id, data=True):
+            if edge.get("type") == "PART_OF":
+                selected_features.add(graph.nodes[member_of].get("name"))
     matched = []
     for f in feats:
         name = f["name"]
         tokens = [t for t in
                   __import__("re").findall(r"[A-Z][a-z]+|[a-z]{4,}", name) if t]
-        if name.lower() in q_lower or (
+        if name in selected_features or name.lower() in q_lower or (
                 tokens and all(t.lower() in q_lower for t in tokens)):
             review = f.get("review") or {}
             matched.append({
                 "feature": name, "source": f.get("source"),
+                "source_freshness": context_facts.get(f["id"], {}).get("source_freshness", "unknown"),
+                "analysis_warnings": list(f.get("analysis_warnings") or []),
                 "declared_intent": _trim(f.get("description"), 300) or "(none declared)",
                 "members": (f.get("members") or [])[:10],
                 "entry_points": (f.get("entry_points") or [])[:6],
@@ -188,6 +207,7 @@ def build_evidence(root: Path, question: str) -> tuple[dict, list[str]]:
         "features_total": len(feats),
         "matched_features": matched,
         "ranked_hits": hits,
+        "context_selection": compact_receipt(selection.receipt),
     }
 
     # approved decisions: the locked intended behaviour for matched features
@@ -196,16 +216,16 @@ def build_evidence(root: Path, question: str) -> tuple[dict, list[str]]:
 
         dstore = DecisionStore(memory_dir, root=root)
         decs = []
-        for m in matched:
-            dec = dstore.approved_for(m["feature"])
+        for scope in [None, *[m["feature"] for m in matched]]:
+            dec = dstore.approved_for(scope)
             if dec:
-                decs.append({"feature": m["feature"], "title": dec["title"],
-                             "behaviour": _trim(dec["intent"]["behaviour"], 300),
-                             "prohibited": dec["intent"].get("prohibited", [])[:4]})
+                decs.append({"feature": scope, "decision_id": dec["id"],
+                             "title": dec["title"], "status": dec["status"],
+                             **dec["intent"]})
         if decs:
             evidence["approved_decisions"] = decs
-    except Exception:
-        pass
+    except ValueError as exc:
+        evidence["decision_store_error"] = str(exc)
 
     # active structured annotations on matched features / hit targets — open
     # contradictions and bug suspicions are part of the honest answer; archived
@@ -270,8 +290,8 @@ def ask(root: Path, question: str, provider: SummaryProvider,
     evidence, nodes = build_evidence(root, question)
     prompt = CHAT_PROMPT.format(
         project=root.name, history_block=_history_block(history),
-        cli_contract=cli_contract(), evidence=json.dumps(evidence, indent=1)[:14000],
-        question=question[:600],
+        cli_contract=cli_contract(), evidence=evidence_json(evidence, 24000),
+        question=question,
     )
     try:
         answer = provider.summarize(prompt, {"max_tokens": CHAT_MAX_TOKENS})
@@ -287,6 +307,7 @@ def ask(root: Path, question: str, provider: SummaryProvider,
         "q": question, "a": answer,
         "provider": provider.name, "model": getattr(provider, "model", None),
         "evidence_nodes": nodes[:20],
+        "context_selection": evidence.get("context_selection"),
         "matched_features": [m["feature"] for m in evidence["matched_features"]],
         "command_validation": {"checked": True, "blocked": invalid_commands},
     }
@@ -294,8 +315,8 @@ def ask(root: Path, question: str, provider: SummaryProvider,
         path = root / config.MEMORY_DIR_NAME / TRANSCRIPT
         with open(path, "a", encoding="utf-8") as f:
             f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except OSError:
-        pass  # the transcript is convenience, never load-bearing
+    except OSError as exc:
+        entry["persistence_warning"] = f"Answer was not saved to history: {type(exc).__name__}"
     return entry
 
 

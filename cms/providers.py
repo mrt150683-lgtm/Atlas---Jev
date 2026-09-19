@@ -93,10 +93,12 @@ class MockProvider:
 
         funcs = [c for c in components if c["kind"] == "func"]
         classes = [c for c in components if c["kind"] == "class"]
+        parse_failed = context.get("parse_status") == "failed"
+        structure = ("structural parsing failed; function/class counts are unknown"
+                     if parse_failed else f"defining {len(funcs)} function(s) and {len(classes)} class(es)")
         lines = [
             "1. **File Purpose**",
-            f"   - `{path}`: {language} file, {line_count} lines, defining "
-            f"{len(funcs)} function(s) and {len(classes)} class(es). "
+            f"   - `{path}`: {language} file, {line_count} lines, {structure}. "
             "(Auto-generated structural summary — mock provider, no LLM.)",
             "",
             "2. **Key Components**",
@@ -110,14 +112,17 @@ class MockProvider:
                 if c.get("anchors"):
                     lines.append(f"     - anchors: {anchors_as_text(c['anchors'])}")
         else:
-            lines.append("   - (no top-level functions or classes)")
+            lines.append("   - (components unavailable: parsing failed)" if parse_failed
+                         else "   - (no top-level functions or classes)")
         lines += [
             "",
             "3. **Important Connections**",
             f"   - Imports: {', '.join(imports) if imports else '(none)'}",
         ]
         if context.get("anchors"):
-            lines.append(f"   - File anchors: {anchors_as_text(context['anchors'])}")
+            lines.append(f"   - Declared intent (unverified): {anchors_as_text(context['anchors'])}")
+        if context.get("parse_status") == "failed":
+            lines.append("   - Structural analysis unavailable: parsing failed; component counts are unknown.")
         return "\n".join(lines)
 
 

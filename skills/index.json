@@ -279,7 +279,7 @@
    "status": "published",
    "enabled": true,
    "trust": "project",
-   "current_version": 1,
+   "current_version": 2,
    "versions": [
     {
      "version": 1,
@@ -287,6 +287,13 @@
      "snapshot": ".versions/atlas-frontend-specialist/v1.md",
      "published_at": "2026-07-14T14:40:49Z",
      "published_by": "Alex Terry"
+    },
+    {
+     "version": 2,
+     "content_hash": "e6d1ef30e9c3e73fe8b16412",
+     "snapshot": ".versions/atlas-frontend-specialist/v2.md",
+     "published_at": "2026-09-05T19:18:27Z",
+     "published_by": "Codex, user-authorized remediation"
     }
    ],
    "created_by": {
@@ -294,7 +301,7 @@
     "identity": "user"
    },
    "created_at": "2026-07-14T14:40:49Z",
-   "updated_at": "2026-07-14T14:40:49Z"
+   "updated_at": "2026-09-05T19:18:27Z"
   },
   {
    "id": "atlas-repo-invariants",

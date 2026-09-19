@@ -11,7 +11,8 @@ no fragile line/offset math that breaks the moment the file is edited.
 from __future__ import annotations
 
 import json
-import time
+import uuid
+from .storage import locked_store, read_json, atomic_text
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -31,17 +32,10 @@ class NotesStore:
         self.memory_dir = memory_dir
 
     def _read(self) -> list[dict]:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return []
-        return data.get("notes", []) if isinstance(data, dict) else []
+        return read_json(self.path, {"notes": []}, rows="notes")["notes"]
 
     def _write(self, notes: list[dict]) -> None:
-        self.memory_dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"notes": notes}, indent=1), encoding="utf-8")
-        tmp.replace(self.path)
+        atomic_text(self.path, json.dumps({"notes": notes}, indent=1))
 
     # -- queries ----------------------------------------------------------
 
@@ -60,12 +54,13 @@ class NotesStore:
 
     # -- mutations --------------------------------------------------------
 
+    @locked_store()
     def add(self, path: str, quote: str, note: str, *, before: str = "",
             color: str = "amber", mode: str = "source") -> dict:
         if not path or not quote.strip():
             raise ValueError("a note needs a file path and a non-empty highlighted quote")
         entry = {
-            "id": f"note-{int(time.time() * 1000):x}",
+            "id": f"note-{uuid.uuid4().hex}",
             "path": path,
             "quote": quote[:MAX_QUOTE],
             "before": before[-60:],
@@ -79,6 +74,7 @@ class NotesStore:
         self._write(notes)
         return entry
 
+    @locked_store()
     def update(self, note_id: str, *, note: str | None = None,
                color: str | None = None) -> dict | None:
         notes = self._read()
@@ -93,6 +89,7 @@ class NotesStore:
                 return n
         return None
 
+    @locked_store()
     def delete(self, note_id: str) -> bool:
         notes = self._read()
         kept = [n for n in notes if n.get("id") != note_id]

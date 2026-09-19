@@ -29,8 +29,9 @@ import re
 import time
 from pathlib import Path
 
-from . import semantic_state as ss
 from .providers import SummaryProvider
+from .storage import atomic_write_json, read_json, transaction, locked_path
+from .prompting import EVIDENCE_RULES
 from .sources import _HARD_PRUNE
 
 SCOUT_DIR = Path.home() / ".cms" / "scout"
@@ -71,16 +72,16 @@ ALREADY ATLAS-MAPPED PROJECTS:
 {mapped}
 """
 
+CARD_PROMPT += EVIDENCE_RULES
+REVIEW_PROMPT += EVIDENCE_RULES
+
 
 class ScoutError(RuntimeError):
     """Real-provider scout stage failed; a failure stays a failure."""
 
 
 def _read_json(path: Path, default):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return default
+    return read_json(path, default)
 
 
 def load_cards() -> dict:
@@ -93,7 +94,7 @@ def load_suggestions() -> dict:
 
 def _save(name: str, payload) -> None:
     SCOUT_DIR.mkdir(parents=True, exist_ok=True)
-    ss.atomic_write_json(SCOUT_DIR / name, payload)
+    atomic_write_json(SCOUT_DIR / name, payload)
 
 
 # ── hunting ──────────────────────────────────────────────────────────────
@@ -122,6 +123,7 @@ def scan_plans(base: Path, provider: SummaryProvider, echo=print,
         raise ScoutError("scout needs a real provider to summarize plans "
                          "(configure an API key)")
     cards = load_cards()
+    original_cards = dict(cards)
     found = find_plans(base)
     stats = {"found": len(found), "new": 0, "unchanged": 0, "failed": 0}
     for path in found:
@@ -148,7 +150,12 @@ def scan_plans(base: Path, provider: SummaryProvider, echo=print,
         except Exception as exc:  # noqa: BLE001 — per-file: record, continue
             parsed = None
             echo(f"  scout: card failed for {path.name}: {exc}")
-        if not parsed or not str(parsed.get("one_liner", "")).strip():
+        valid = (isinstance(parsed, dict) and isinstance(parsed.get("one_liner"), str)
+                 and parsed["one_liner"].strip() and isinstance(parsed.get("atlas_candidate"), bool)
+                 and all(isinstance(parsed.get(key, []), list)
+                         and all(isinstance(value, str) for value in parsed.get(key, []))
+                         for key in ("tags", "goals")))
+        if not valid:
             cards[key] = {"name": path.name, "project_dir": path.parent.name,
                           "content_hash": digest, "status": "failed"}
             stats["failed"] += 1
@@ -167,7 +174,15 @@ def scan_plans(base: Path, provider: SummaryProvider, echo=print,
             "status": "ok",
         }
         stats["new"] += 1
-    _save("plans.json", cards)
+    with transaction(SCOUT_DIR / "plans.json"):
+        current = load_cards()
+        current.update({k: v for k, v in cards.items() if v != original_cards.get(k)})
+        scan_root = Path(base).resolve()
+        for key in list(current):
+            candidate_path = Path(key).resolve()
+            if (candidate_path == scan_root or scan_root in candidate_path.parents) and not candidate_path.is_file():
+                del current[key]
+        _save("plans.json", current)
     return stats
 
 
@@ -218,6 +233,17 @@ def mass_review(provider: SummaryProvider, max_items: int = 6) -> dict:
     except json.JSONDecodeError as exc:
         raise ScoutError(f"provider returned invalid JSON: {exc}") from exc
 
+    sections = ("concepts", "patterns", "pairings", "atlas_candidates")
+    if not isinstance(parsed, dict) or any(not isinstance(parsed.get(key), list) for key in sections):
+        raise ScoutError("review requires concepts, patterns, pairings and atlas_candidates arrays")
+    known = {c["name"] for c in cards.values()} | {c["project_dir"] for c in cards.values()} | set(filter(None, mapped))
+    for key in sections:
+        for item in parsed[key]:
+            if (not isinstance(item, dict) or not isinstance(item.get("title"), str)
+                    or not item["title"].strip() or not isinstance(item.get("description"), str)
+                    or not isinstance(item.get("builds_on"), list)
+                    or any(not isinstance(v, str) or v not in known for v in item["builds_on"])):
+                raise ScoutError("review items must cite named plans/projects from the evidence")
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     fresh: list[str] = []
     for kind in ("concepts", "patterns", "pairings", "atlas_candidates"):
@@ -238,12 +264,20 @@ def mass_review(provider: SummaryProvider, max_items: int = 6) -> dict:
                 "first_seen": now, "last_seen": now,
             }
             fresh.append(sid)
-    _save("suggestions.json", suggestions)
+    with transaction(SCOUT_DIR / "suggestions.json"):
+        current = load_suggestions()
+        for sid, item in suggestions.items():
+            if sid in current:
+                current[sid]["last_seen"] = item.get("last_seen", now)
+            else:
+                current[sid] = item
+        _save("suggestions.json", current)
     return {"cards_reviewed": len(cards), "new_suggestions": len(fresh),
             "dismissed_excluded": len(dismissed),
             "suggestions": [suggestions[s] for s in fresh]}
 
 
+@locked_path(lambda: SCOUT_DIR / "suggestions.json")
 def set_suggestion_status(sid: str, status: str) -> dict:
     if status not in SUGGESTION_STATUSES:
         raise ScoutError(f"status must be one of {SUGGESTION_STATUSES}")

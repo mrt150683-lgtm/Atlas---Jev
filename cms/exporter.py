@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
+import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -69,22 +73,19 @@ def export_graph(graph: nx.DiGraph, memory_dir: Path) -> Path:
 def export_summaries(graph: nx.DiGraph, memory_dir: Path) -> int:
     """One markdown file per summarized source file, mirroring the source layout."""
     summaries_dir = memory_dir / "summaries"
-    count = 0
+    documents = {}
     for node_id, attrs in graph.nodes(data=True):
         if attrs.get("type") != "file" or not attrs.get("summary"):
             continue
         rel = attrs["path"]
-        target = summaries_dir / (rel + ".md")
-        target.parent.mkdir(parents=True, exist_ok=True)
         provider = (attrs.get("summary_meta") or {}).get("provider", "?")
-        target.write_text(
+        documents[rel + ".md"] = (
             f"# {rel}\n\n"
             f"*{attrs.get('line_count', '?')} lines · provider: {provider}*\n\n"
-            f"{attrs['summary']}\n",
-            encoding="utf-8",
+            f"{attrs['summary']}\n"
         )
-        count += 1
-    return count
+    _reconcile_exports(summaries_dir, documents, "summaries")
+    return len(documents)
 
 
 def export_features(graph: nx.DiGraph, memory_dir: Path) -> int:
@@ -92,27 +93,96 @@ def export_features(graph: nx.DiGraph, memory_dir: Path) -> int:
     from .features import get_features
 
     features = get_features(graph)
-    if not features:
-        return 0
     features_dir = memory_dir / "features"
-    features_dir.mkdir(parents=True, exist_ok=True)
+    documents = {}
     toc = ["# Feature Traces\n"]
+    safe_names = ["".join(c if c.isalnum() or c in "-_" else "_" for c in f["name"]) for f in features]
     for f in features:
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in f["name"])
+        if sum(s.casefold() == safe.casefold() for s in safe_names) > 1 or safe.upper() in {
+            "README", "CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)), *(f"LPT{i}" for i in range(1, 10))
+        }:
+            safe += "-" + hashlib.sha256(f["name"].encode()).hexdigest()[:10]
         member_lines = "\n".join(f"- `{m}`" for m in f.get("members", []))
-        (features_dir / f"{safe}.md").write_text(
+        documents[f"{safe}.md"] = (
             f"# Feature: {f['name']}\n\n"
             f"*source: {f.get('source', '?')}"
             + (f" · connects: {', '.join(f['connects'])}" if f.get("connects") else "")
             + "*\n\n"
             + (f"> {f['description']}\n\n" if f.get("description") else "")
             + f"{f.get('summary', '')}\n\n"
-            f"## Members\n{member_lines}\n",
-            encoding="utf-8",
+            f"## Members\n{member_lines}\n"
         )
         toc.append(f"- [{f['name']}]({safe}.md) — {f.get('description') or f.get('source', '')}")
-    (features_dir / "README.md").write_text("\n".join(toc) + "\n", encoding="utf-8")
+    documents["README.md"] = "\n".join(toc) + "\n"
+    _reconcile_exports(features_dir, documents, "features")
     return len(features)
+
+
+EXPORT_MANIFEST = ".atlas-generated.json"
+
+
+def _export_target(directory: Path, rel: str) -> Path:
+    target = (directory / rel).resolve()
+    if directory.resolve() not in target.parents:
+        raise ValueError(f"Invalid generated export path: {rel!r}")
+    return target
+
+
+def _reconcile_exports(directory: Path, documents: dict[str, str], kind: str) -> None:
+    """Prune only known generated outputs, preserving unrelated/edited files.
+
+    A content manifest supports safe ownership migration and lets bundles omit
+    obsolete user-edited copies that we deliberately preserve on local disk.
+    """
+    from .semantic_state import atomic_write_json
+
+    directory.mkdir(parents=True, exist_ok=True)
+    manifest = directory / EXPORT_MANIFEST
+    previous = {}
+    if manifest.is_file():
+        record = json.loads(manifest.read_text(encoding="utf-8"))
+        if not isinstance(record, dict) or not isinstance(record.get("files"), dict):
+            raise ValueError(f"Invalid generated export manifest: {manifest}")
+        previous = record["files"]
+    else:
+        # Older Atlas versions lack a manifest. Their exact generated heading
+        # shapes identify owned artifacts; arbitrary Markdown is never adopted.
+        for path in directory.rglob("*.md"):
+            if not path.is_file() or path.is_symlink():
+                continue
+            body = path.read_text(encoding="utf-8", errors="replace")
+            owned = (bool(re.match(r"^# .+\n\n\*[^\n]*provider: [^\n]*\*\n", body))
+                     if kind == "summaries" else
+                     bool(re.match(r"^# Feature: .+\n\n\*source: ", body))
+                     or (path.name == "README.md" and body.startswith("# Feature Traces\n")))
+            if owned:
+                previous[path.relative_to(directory).as_posix()] = hashlib.sha256(path.read_bytes()).hexdigest()
+
+    # Validate all destinations before changing any artifact.
+    for rel in documents:
+        target = _export_target(directory, rel)
+        if target.exists() and rel not in previous:
+            raise FileExistsError(f"Refusing to overwrite an untracked export file: {target}")
+    current = {}
+    for rel, body in documents.items():
+        target = _export_target(directory, rel)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = body.encode("utf-8")
+        temporary = target.with_name(target.name + f".{uuid.uuid4().hex}.tmp")
+        try:
+            temporary.write_bytes(payload)
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+        current[rel] = hashlib.sha256(payload).hexdigest()
+    for rel, digest in previous.items():
+        if rel in current:
+            continue
+        target = _export_target(directory, rel)
+        if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest() == digest:
+            target.unlink()
+    atomic_write_json(manifest, {"schema_version": 1, "files": current})
 
 
 def export_index(graph: nx.DiGraph, memory_dir: Path, file_count: int) -> None:

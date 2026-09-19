@@ -23,7 +23,7 @@ from .prompt_export import build_task_pack
 def _infer_goal(root: Path) -> tuple[str, str]:
     """(goal, source) from the current git branch, else the last commit subject."""
     branch = (_git(root, "rev-parse", "--abbrev-ref", "HEAD") or "").strip()
-    if branch and branch not in ("HEAD", ""):
+    if branch and branch not in ("HEAD", "", "main", "master", "develop", "development"):
         readable = branch.rsplit("/", 1)[-1].replace("-", " ").replace("_", " ").strip()
         if readable:
             return readable, "branch"
@@ -53,6 +53,9 @@ def capture_intent(root: Path, goal: str | None = None, base: str = "HEAD", top_
     mem = CodebaseMemory.load(memory_dir / "graph.json")
     pack = build_task_pack(mem, root, goal, top_k=top_k, assets=assets)
     pack["intent_source"] = source
+    pack["intent_confirmed"] = source == "explicit"
+    pack["intent_limitation"] = (None if source == "explicit" else
+        "Branch/commit text is a context hint, not confirmed acceptance criteria; supply an explicit goal before completion assessment.")
     pack["base"] = base
 
     AlignStore(memory_dir).save_intent(pack)

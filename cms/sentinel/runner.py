@@ -192,6 +192,7 @@ def run_scan(root: Path, modules: tuple[str, ...] = MODULES, echo=lambda *_: Non
             area="sentinel_self", pattern=f"module-error-{name}",
             risk="A scanner that cannot run cannot clear anything — treat its area as unaudited.",
             recommendation="Fix the module error; a bug-finding system that cannot prove its own work is just another bug.",
+            fingerprint_of=name,
         ))
 
     scan["duration_s"] = round(time.time() - started, 2)
@@ -199,6 +200,15 @@ def run_scan(root: Path, modules: tuple[str, ...] = MODULES, echo=lambda *_: Non
     scan["gate"] = {}  # placeholder so merge writes history with a gate key
     merged = store.merge_scan(scan)
     gate = evaluate_gate(merged, cfg)
+    gate["scan_complete"] = not bool(scan["module_errors"])
+    gate["scope"] = "selected static checks and Atlas self-health; target application acceptance is not implied"
+    if scan["module_errors"]:
+        gate["failed"] = True
+        gate["reasons"] = [f"Required selected module {name} did not complete" for name in scan["module_errors"]] + gate["reasons"]
+    scan["verification_scope"] = {
+        "selected_modules": list(modules), "atlas_self_checks": len(scan["workflow_checks"]),
+        "target_application_acceptance": "not_run", "completion_proven": False,
+    }
     scan["gate"] = gate
     # persist the gate result on the saved artifacts too
     store._write(store.latest_path, scan)

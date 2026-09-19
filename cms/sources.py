@@ -128,7 +128,11 @@ def analyze_sources(root: Path) -> dict:
 
     default_spec = _mkspec(list(DEFAULT_IGNORES))
     git_spec = _mkspec(list(DEFAULT_IGNORES) + git_lines)
-    full_spec = _mkspec(list(DEFAULT_IGNORES) + git_lines + cms_lines)
+    from .scanner import IgnoreMatcher, scan
+    full_spec = IgnoreMatcher(root)
+    git_spec = IgnoreMatcher(root)
+    git_spec.overrides = _mkspec([])
+    processed_paths = {record.rel_path for record in scan(root)}
 
     included: list[str] = []
     excluded_by_gitignore: list[str] = []
@@ -151,8 +155,10 @@ def analyze_sources(root: Path) -> dict:
             if Path(name).suffix.lower() not in LANGUAGE_BY_EXTENSION:
                 continue
             rel = f"{prefix}{name}"
-            if not full_spec.match_file(rel):
+            if rel in processed_paths:
                 included.append(rel)
+            elif not full_spec.match_file(rel):
+                continue  # excluded by the explicit processing scope
             elif default_spec.match_file(rel):
                 excluded_by_default += 1
             elif git_spec.match_file(rel):

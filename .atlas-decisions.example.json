@@ -1,0 +1,8 @@
+{
+  "mode": "off",
+  "allow_cloud": false,
+  "model": "jev-1.13.0",
+  "timeout_seconds": 4,
+  "max_candidates": 24,
+  "max_input_chars": 48000
+}

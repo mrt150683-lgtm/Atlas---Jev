@@ -78,8 +78,9 @@ def test_changed_file_is_reprocessed(tmp_path: Path) -> None:
     stats = incremental_update(root, p, echo=lambda *a: None)
     assert stats.changed == ["two.py"]
     assert stats.summarized == 1
-    # feature Two's member changed -> narrative regenerated (1 summary + 1 narrative)
-    assert p.calls == 2
+    # Re-check discovery when existing source changes as well as refreshing
+    # its file summary and the affected narrative (three bounded calls).
+    assert p.calls == 3
 
     # unchanged file kept its summary carried over from the old graph
     from cms.memory import CodebaseMemory

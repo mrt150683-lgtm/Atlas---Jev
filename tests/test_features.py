@@ -108,17 +108,30 @@ def test_features_queryable(tmp_path: Path) -> None:
     assert any(r.node_id == "feature:DataPipeline" for r in results)
 
 
-def test_discovered_synonyms_collapse_to_canonical_feature_with_aliases(tmp_path: Path) -> None:
+def test_class_member_relations_include_method_calls(tmp_path: Path) -> None:
+    (tmp_path / "worker.py").write_text(
+        "from sink import save\n# @memory:feature:Work\nclass Worker:\n    def run(self):\n        save()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "sink.py").write_text("# @memory:feature:Storage\ndef save():\n    pass\n", encoding="utf-8")
+    graph = build_graph(scan(tmp_path))
+    build_features(graph, MockProvider())
+    assert graph.edges["feature:Work", "feature:Storage"]["type"] == "RELATES"
+    assert any(step["id"] == "func:worker.py::Worker.run"
+               for flow in graph.nodes["feature:Work"]["flows"] for step in flow)
+
+
+def test_explicit_discovered_synonyms_collapse_to_canonical_feature_with_aliases(tmp_path: Path) -> None:
     (tmp_path / "tree_export.py").write_text("def export():\n    pass\n", encoding="utf-8")
     (tmp_path / "other.py").write_text("def separate():\n    pass\n", encoding="utf-8")
     graph = build_graph(scan(tmp_path))
     extras = [
         Feature(name="NestedTreeStructureExport", source="discovered",
-                members=["file:tree_export.py"]),
+                members=["file:tree_export.py"], aliases=["CodebaseDocumentationExport"]),
         Feature(name="CodebaseDocumentationExport", source="discovered",
                 members=["file:tree_export.py"]),
         Feature(name="CodebaseTreeExport", source="discovered",
-                members=["file:tree_export.py"]),
+                members=["file:tree_export.py"], aliases=["CodebaseDocumentationExport"]),
         Feature(name="SeparateCapability", source="discovered",
                 members=["file:other.py"]),
     ]

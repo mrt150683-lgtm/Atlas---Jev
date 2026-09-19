@@ -40,17 +40,17 @@ def test_insufficient_evidence_when_thin(proj) -> None:
     assert f["dimensions"]["tests_passing"] == "not_recorded"
 
 
-def test_on_track_with_review_and_tests(proj) -> None:
+def test_legacy_pass_and_review_are_unbound(proj) -> None:
     root, graph = proj
     node = graph.nodes["feature:Greeting"]
     node["review"] = {"verdict": "aligned", "headline": "ok"}
     node["exercised_by"] = ["tests/test_app.py::test_greet"]
     node["verify_result"] = {"passed": True, "tests": 1, "at": "2026-07-13T00:00:00Z"}
     f = intent_fidelity(root, graph, "Greeting")
-    assert f["overall"] == "on_track"
-    assert f["dimensions"]["implemented"] == "yes"
-    assert f["dimensions"]["tests_passing"] == "passed"
-    assert "1 mapped test" in f["explanations"]["tests_present"]
+    assert f["overall"] == "insufficient_evidence"
+    assert f["dimensions"]["implemented"] == "unknown"
+    assert f["dimensions"]["tests_passing"] == "stale"
+    assert f["dimensions"]["stale_evidence"] is True
 
 
 def test_attention_on_contradiction(proj) -> None:

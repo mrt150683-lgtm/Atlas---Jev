@@ -98,8 +98,9 @@ def test_supersession_stays_in_scope_and_targets_current_approval(store) -> None
     successor = store.propose("FeatureA", "successor", INTENT,
                               supersedes=feature_current["id"])
     store.close(feature_current["id"], "implemented")
-    with pytest.raises(ValueError, match="current approved"):
-        store.approve(successor["id"], "alex")
+    assert store.approved_for("FeatureA")["id"] == feature_current["id"]
+    store.approve(successor["id"], "alex")
+    assert store.get(feature_current["id"])["status"] == "superseded"
 
     app_rogue = store.propose(None, "competing application word", INTENT)
     with pytest.raises(ValueError, match="application scope"):
@@ -119,7 +120,8 @@ def test_closure_outcomes(store) -> None:
     assert store.close(d2["id"], "rejected")["status"] == "rejected"
     with pytest.raises(ValueError):
         store.close(d2["id"], "vanished")
-    assert set(ACTIVE_STATUSES) == {"proposed", "approved"}
+    assert closed["id"] in {row["id"] for row in store.list(active_only=True)}
+    assert store.approved_for("F")["id"] == closed["id"]
     assert "superseded" in STATUSES
 
 
@@ -152,5 +154,6 @@ def test_alignment_reports_approved_intent(tmp_path, monkeypatch) -> None:
     assert rec["approved_intent"] == [{
         "feature": "Greeting", "decision_id": d["id"], "title": "Greet politely",
         "behaviour": "greet returns the name unchanged", "prohibited": [],
+        "intent": store.get(d["id"])["intent"],
         "approved_at": store.get(d["id"])["approved_at"],
     }]

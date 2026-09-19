@@ -19,20 +19,21 @@ intent). Store: ``.memory/decisions.json``.
 
 from __future__ import annotations
 
-import json
+import uuid
+from .storage import locked_store, read_json
 import subprocess
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
-from .semantic_state import atomic_write_json
+from .storage import atomic_write_json
 
 DECISIONS_FILE = "decisions.json"
 
 STATUSES = ("proposed", "approved", "rejected", "implemented",
             "partially_implemented", "failed", "superseded")
 # statuses that count as "the current word" on a feature's intent
-ACTIVE_STATUSES = ("proposed", "approved")
+ACTIVE_STATUSES = ("proposed", "approved", "implemented", "partially_implemented", "failed")
+OPERATIVE_STATUSES = ("approved", "implemented", "partially_implemented", "failed")
 CLOSURE_STATUSES = ("implemented", "partially_implemented", "failed")
 MAX_TEXT = 2000
 
@@ -72,11 +73,7 @@ class DecisionStore:
         self.root = Path(root) if root else self.memory_dir.parent
 
     def _read(self) -> list[dict]:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return []
-        return data.get("decisions", []) if isinstance(data, dict) else []
+        return read_json(self.path, {"decisions": []}, rows="decisions")["decisions"]
 
     def _write(self, decisions: list[dict]) -> None:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
@@ -98,15 +95,21 @@ class DecisionStore:
             rows = [d for d in rows if d.get("status") in ACTIVE_STATUSES]
         return sorted(rows, key=lambda d: d.get("created_at", ""), reverse=True)
 
-    def approved_for(self, feature: str) -> dict | None:
+    def approved_for(self, feature: str | None) -> dict | None:
         """The single current approved intent for a feature (newest wins)."""
         approved = [d for d in self._read()
-                    if d.get("feature") == feature and d.get("status") == "approved"]
+                    if d.get("feature") == feature and d.get("status") in OPERATIVE_STATUSES]
         approved.sort(key=lambda d: d.get("approved_at", ""), reverse=True)
         return approved[0] if approved else None
 
+    def current_intents(self) -> list[dict]:
+        """All unsuperseded human-approved requirements, even after implementation."""
+        return [d for d in self._read() if d.get("status") in OPERATIVE_STATUSES
+                and d.get("approved_by")]
+
     # -- mutations ----------------------------------------------------------
 
+    @locked_store()
     def propose(self, feature: str | None, title: str, intent: dict, *,
                 created_by: dict | None = None, supersedes: str | None = None,
                 annotations: list | None = None, evidence: list | None = None) -> dict:
@@ -122,10 +125,10 @@ class DecisionStore:
                     f"cannot supersede decision {supersedes!r} from a different feature scope")
             current = next(
                 (d for d in decisions
-                 if d.get("feature") == (feature or None) and d.get("status") == "approved"),
+                 if d.get("feature") == (feature or None) and d.get("status") in OPERATIVE_STATUSES),
                 None,
             )
-            if predecessor.get("status") != "approved" or (
+            if predecessor.get("status") not in OPERATIVE_STATUSES or (
                     current and current.get("id") != supersedes):
                 current_id = current.get("id") if current else "none"
                 raise ValueError(
@@ -135,9 +138,9 @@ class DecisionStore:
         author.setdefault("kind", "user")
         author.setdefault("identity", author["kind"])
         entry = {
-            "id": f"dec-{int(time.time() * 1000):x}-{len(decisions) % 997:03d}",
+            "id": f"dec-{uuid.uuid4().hex}",
             "version": 1 + sum(1 for d in decisions
-                               if d.get("feature") == feature) if feature else 1,
+                               if d.get("feature") == (feature or None)),
             "supersedes": supersedes,
             "feature": feature or None,
             "title": str(title)[:200],
@@ -156,6 +159,7 @@ class DecisionStore:
         self._write(decisions)
         return entry
 
+    @locked_store()
     def approve(self, dec_id: str, approved_by: str) -> dict:
         """Human approval: locks the intent and supersedes the ancestor."""
         if not str(approved_by or "").strip():
@@ -175,7 +179,7 @@ class DecisionStore:
         scope = target.get("feature")
         current = next(
             (d for d in decisions
-             if d.get("feature") == scope and d.get("status") == "approved"),
+             if d.get("feature") == scope and d.get("status") in OPERATIVE_STATUSES),
             None,
         )
         if current and target.get("supersedes") != current.get("id"):
@@ -189,7 +193,7 @@ class DecisionStore:
             predecessor = next(
                 (d for d in decisions if d.get("id") == target["supersedes"]), None)
             if (predecessor is None or predecessor.get("feature") != scope
-                    or predecessor.get("status") != "approved"
+                    or predecessor.get("status") not in OPERATIVE_STATUSES
                     or not current or predecessor.get("id") != current.get("id")):
                 raise ValueError(
                     "supersedes must still name the current approved decision in the same scope")
@@ -202,6 +206,7 @@ class DecisionStore:
         self._write(decisions)
         return target
 
+    @locked_store()
     def close(self, dec_id: str, status: str, *, reason: str = "") -> dict:
         """Verification outcome for an approved decision. The intent payload
         stays frozen — only the lifecycle state moves."""

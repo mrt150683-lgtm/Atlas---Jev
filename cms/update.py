@@ -1,8 +1,8 @@
 """Incremental updates — keep .memory/ in sync without re-paying LLM costs.
 
 ``incremental_update`` rebuilds the structural graph (fast, always), but
-carries over summaries for files whose mtime is unchanged and feature
-narratives whose members didn't change, so only genuinely changed nodes hit
+carries over summaries whose content fingerprints and prompt version match,
+and feature narratives whose member/dependency inputs match, so changed nodes hit
 the LLM. ``watch`` polls for changes and re-runs the update.
 """
 
@@ -18,13 +18,14 @@ import networkx as nx
 from . import config
 from . import semantic_state as ss
 from .exporter import export_features, export_graph, export_index, export_summaries
-from .features import DiscoveryError, Feature, build_features, discover_features_llm, prepare_known
+from .features import (DISCOVERY_PROMPT_VERSION, DiscoveryError, Feature, build_features,
+                       discover_features_llm, feature_context_hash, prepare_known)
 from .githistory import enrich_graph_with_git
 from .graph_builder import build_graph
 from .memory import CodebaseMemory
 from .providers import SummaryProvider
 from .scanner import scan
-from .summarizer import generate_summaries
+from .summarizer import SUMMARY_PROMPT_VERSION, generate_summaries
 from .tree_export import export_tree
 
 
@@ -41,12 +42,15 @@ class UpdateStats:
             self.changed = []
 
 
-def _carry_over(old: nx.DiGraph, new: nx.DiGraph, upgrade_mock: bool = False) -> set[str]:
+def _carry_over(old: nx.DiGraph, new: nx.DiGraph, upgrade_mock: bool = False,
+                provider: SummaryProvider | None = None) -> set[str]:
     """Copy summaries from old graph for unchanged files. Returns changed paths.
 
     With `upgrade_mock`, mock-generated summaries don't count as done — a real
     provider is available now, so those files re-enter the changed set."""
-    changed: set[str] = set()
+    old_paths = {a["path"] for _, a in old.nodes(data=True) if a.get("type") == "file"}
+    new_paths = {a["path"] for _, a in new.nodes(data=True) if a.get("type") == "file"}
+    changed: set[str] = old_paths - new_paths
     for node_id, attrs in new.nodes(data=True):
         if attrs.get("type") != "file":
             continue
@@ -58,7 +62,13 @@ def _carry_over(old: nx.DiGraph, new: nx.DiGraph, upgrade_mock: bool = False) ->
         stale_mock = (
             upgrade_mock and (old_attrs.get("summary_meta") or {}).get("provider") == "mock"
         )
-        if old_attrs.get("mtime") != attrs.get("mtime") or not old_attrs.get("summary") or stale_mock:
+        old_meta = old_attrs.get("summary_meta") or {}
+        provider_changed = (provider is not None and provider.name != "mock" and (
+            old_meta.get("provider") != provider.name or old_meta.get("model") != getattr(provider, "model", None)
+        ))
+        if (not attrs.get("content_hash") or old_attrs.get("content_hash") != attrs.get("content_hash")
+                or not old_attrs.get("summary") or stale_mock or provider_changed
+                or old_meta.get("prompt_version") != SUMMARY_PROMPT_VERSION):
             changed.add(path)
             continue
         # unchanged: reuse the file summary and every component summary
@@ -70,14 +80,12 @@ def _carry_over(old: nx.DiGraph, new: nx.DiGraph, upgrade_mock: bool = False) ->
                 if old.has_node(other_id):
                     if old.nodes[other_id].get("summary"):
                         other["summary"] = old.nodes[other_id]["summary"]
-                    # step-granular coverage evidence survives with its file
-                    if old.nodes[other_id].get("exercised_by"):
-                        other["exercised_by"] = old.nodes[other_id]["exercised_by"]
     return changed
 
 
 def _narrative_cache(
-    old: nx.DiGraph, changed: set[str], upgrade_mock: bool = False
+    old: nx.DiGraph, changed: set[str], upgrade_mock: bool = False,
+    graph: nx.DiGraph | None = None, features: dict[str, Feature] | None = None,
 ) -> dict[str, tuple[str, str]]:
     """Feature narratives safe to reuse (as (text, original_provider)): no member
     file changed, and not a mock narrative when a real provider is now available."""
@@ -87,6 +95,10 @@ def _narrative_cache(
             continue
         if upgrade_mock and attrs.get("narrative_provider", "mock") == "mock":
             continue
+        if graph is not None and features is not None:
+            current = features.get(attrs["name"])
+            if current is None or attrs.get("narrative_context_hash") != feature_context_hash(graph, current):
+                continue
         member_paths = {
             old.nodes[m].get("path") for m in attrs.get("members", []) if old.has_node(m)
         }
@@ -117,6 +129,20 @@ def _prior_discovered(old: nx.DiGraph) -> list:
 def incremental_update(
     root: Path, provider: SummaryProvider, echo=print, full: bool = False
 ) -> UpdateStats:
+    """Serialize updates to one root; different projects may still build together."""
+    key = str(Path(root).resolve()).casefold()
+    with _update_locks_guard:
+        lock = _update_locks.setdefault(key, threading.RLock())
+    with lock:
+        return _incremental_update(root, provider, echo=echo, full=full)
+
+
+_update_locks_guard = threading.Lock()
+_update_locks: dict[str, threading.RLock] = {}
+
+
+def _incremental_update(root: Path, provider: SummaryProvider, echo=print,
+                        full: bool = False) -> UpdateStats:
     root = root.resolve()
     memory_dir = root / config.MEMORY_DIR_NAME
     graph_path = memory_dir / "graph.json"
@@ -132,20 +158,27 @@ def incremental_update(
     upgrade_mock = provider.name != "mock"
     graph = build_graph(records)
     if old is not None:
-        changed = _carry_over(old, graph, upgrade_mock=upgrade_mock)
+        changed = _carry_over(old, graph, upgrade_mock=upgrade_mock, provider=provider)
     else:
         changed = {r.rel_path for r in records}
     stats.changed = sorted(changed)
 
-    stats.summarized = generate_summaries(
-        graph, root, provider,
-        on_progress=lambda p, d, t: echo(f"  summarize [{d}/{t}] {p}"),
-        only_paths=changed,
-    )
+    try:
+        stats.summarized = generate_summaries(
+            graph, root, provider,
+            on_progress=lambda p, d, t: echo(f"  summarize [{d}/{t}] {p}"),
+            only_paths=changed,
+        )
+    except Exception as exc:
+        previous = ss.stage(ss.load_state(memory_dir), "summaries")
+        ss.record_stage(
+            memory_dir, "summaries", status="failed", provider=provider.name,
+            model=getattr(provider, "model", None), real_provider=provider.name != "mock",
+            error=f"{type(exc).__name__}: {exc}"[:300],
+            **({"last_success": previous} if previous.get("status") == "complete" else {}),
+        )
+        raise
 
-    narrative_cache = (
-        _narrative_cache(old, changed, upgrade_mock=upgrade_mock) if old is not None else {}
-    )
     extra = _prior_discovered(old) if old is not None else []
     new_files = old is not None and any(not old.has_node(f"file:{p}") for p in changed)
     # A build done with the mock provider never ran LLM feature discovery
@@ -177,6 +210,11 @@ def incremental_update(
         memory_dir, graph, provider, extra,
         force=(old is None or new_files or mock_refresh), echo=echo,
     )
+    candidates, _, _ = prepare_known(graph, extra)
+    narrative_cache = (
+        _narrative_cache(old, changed, upgrade_mock=upgrade_mock, graph=graph, features=candidates)
+        if old is not None else {}
+    )
     feats = build_features(
         graph, provider,
         on_progress=lambda name, d, t: echo(f"  trace [{d}/{t}] {name}"),
@@ -191,10 +229,24 @@ def incremental_update(
         # members didn't change (same freshness rule as narratives)
         for feat in feats:
             if old.has_node(feat.node_id) and feat.name in narrative_cache:
-                for attr in ("exercised_by", "review", "flow_review", "verify_result"):
+                for attr in ("review", "flow_review"):
                     value = old.nodes[feat.node_id].get(attr)
                     if value:
                         graph.nodes[feat.node_id][attr] = value
+            # Verification is history, not a claim that current source passed.
+            # Its fingerprint is evaluated by consumers; preserve that history
+            # across updates but never transfer unversioned coverage as current.
+            if old.has_node(feat.node_id) and old.nodes[feat.node_id].get("verify_result"):
+                graph.nodes[feat.node_id]["verify_result"] = old.nodes[feat.node_id]["verify_result"]
+            if old.has_node(feat.node_id) and old.nodes[feat.node_id].get("behavioral_evidence"):
+                graph.nodes[feat.node_id]["behavioral_evidence"] = old.nodes[feat.node_id]["behavioral_evidence"]
+        from .verify import coverage_is_current
+
+        if coverage_is_current(root, old):
+            graph.graph["coverage_evidence"] = old.graph["coverage_evidence"]
+            for node_id, attrs in graph.nodes(data=True):
+                if old.has_node(node_id) and old.nodes[node_id].get("exercised_by"):
+                    attrs["exercised_by"] = old.nodes[node_id]["exercised_by"]
         # app-level rollups carry over wholesale (regenerate with cms review/suggest)
         for node_id in ("review:app", "suggestions:app"):
             if old.has_node(node_id) and not graph.has_node(node_id):
@@ -280,9 +332,8 @@ def _run_discovery(memory_dir: Path, graph, provider, extras: list,
       an explicit `skipped` only when NO record exists yet (a mock run must
       never downgrade real evidence).
     - never_run / failed / skipped -> run (this is the legacy migration and
-      the retry path). complete -> run only when forced (new files,
-      mock->real upgrade, full rebuild); an unchanged complete record is
-      never re-charged.
+      the retry path). complete -> refresh when semantic inputs or prompt
+      version change; identical completed input is never re-charged.
     - provider errors / malformed output record `failed` (with the prior
       complete record preserved under last_success) — never an empty
       'success'. A legitimate zero-feature result IS recorded complete.
@@ -304,14 +355,17 @@ def _run_discovery(memory_dir: Path, graph, provider, extras: list,
     with _discovery_lock:
         state = ss.load_state(memory_dir)
         rec = ss.stage(state, "features")
-        rerun = force or rec.get("status") in ("never_run", "skipped")
+        identical = (rec.get("input_hash") == input_hash
+                     and rec.get("prompt_version") == DISCOVERY_PROMPT_VERSION)
+        rerun = (force or rec.get("status") in ("never_run", "skipped")
+                 or (rec.get("status") == "complete" and not identical))
         if rec.get("status") == "failed":
             if rec.get("input_hash") != input_hash:
                 rerun = True  # retry a recorded failure once something changed
             elif _older_than(rec.get("generated_at"), DISCOVERY_RETRY_COOLDOWN_S):
                 rerun = True  # transient provider failures self-heal on the
                 # next build after a cooldown (no hammering in quick succession)
-        if rec.get("status") == "complete" and rec.get("input_hash") == input_hash:
+        if rec.get("status") == "complete" and identical:
             rerun = False  # positively recorded success over identical input: never re-charge
         if not rerun:
             return extras + _features_from_state(rec, extras, graph), False
@@ -332,6 +386,7 @@ def _run_discovery(memory_dir: Path, graph, provider, extras: list,
                 memory_dir, "features", status="failed",
                 provider=provider.name, model=getattr(provider, "model", None),
                 real_provider=True, input_hash=input_hash,
+                prompt_version=DISCOVERY_PROMPT_VERSION,
                 error=str(exc)[:300], **keep,
             )
             echo(f"  discover: FAILED — {exc} (recorded; a later update will retry)")
@@ -345,6 +400,7 @@ def _run_discovery(memory_dir: Path, graph, provider, extras: list,
             memory_dir, "features", status="complete",
             provider=provider.name, model=getattr(provider, "model", None),
             real_provider=True, input_hash=input_hash,
+            prompt_version=DISCOVERY_PROMPT_VERSION,
             discovered_features=[
                 {"name": f.name, "description": f.description, "members": list(f.members),
                  "aliases": list(f.aliases)}
@@ -474,35 +530,72 @@ def _ensure_judgment_locked(root, provider, echo, graph_path, ran) -> dict:
 
 
 def _scan_signature(root: Path) -> tuple:
-    return tuple(sorted((r.rel_path, r.mtime, r.size_bytes) for r in scan(root)))
+    return tuple(sorted((r.rel_path, r.content_hash, r.size_bytes) for r in scan(root)))
 
 
-def watch(root: Path, provider: SummaryProvider, interval: float = 2.0, echo=print) -> None:
-    """Poll for changes and update incrementally. Ctrl+C to stop."""
+def watch(root: Path, provider: SummaryProvider, interval: float = 2.0, echo=print,
+          stop_event: threading.Event | None = None, on_status=None) -> None:
+    """Poll with recoverable failures and interruptible waits.
+
+    ``on_status`` receives a dict with running/retrying/stopped state. Last
+    successful signatures are retained on errors, so recovery retries the
+    pending input without requiring another edit. In-flight updates finish
+    before a requested stop, avoiding partially cancelled graph writes.
+    """
     root = root.resolve()
+    stop = stop_event if stop_event is not None else threading.Event()
+    interval = max(0.01, interval)
+    memory_dir = root / config.MEMORY_DIR_NAME
     echo(f"cms watch: {root.name} (every {interval:g}s, Ctrl+C to stop)")
-    last = _scan_signature(root)
-    if not (root / config.MEMORY_DIR_NAME / "graph.json").is_file():
-        echo("no memory layer yet — building initial one")
-        incremental_update(root, provider, echo=echo)
+    last = None
+    failures = 0
+    initialized = False
+
+    def report(status, **detail):
+        record = {"status": status, "root": str(root), **detail}
+        try:
+            memory_dir.mkdir(parents=True, exist_ok=True)
+            ss.atomic_write_json(memory_dir / "watch_status.json", record)
+        except OSError as exc:
+            echo(f"watch: could not persist status ({type(exc).__name__})")
+        if on_status is not None:
+            try:
+                on_status(record)
+            except Exception as exc:
+                echo(f"watch: status observer failed ({type(exc).__name__})")
+
     try:
-        while True:
-            time.sleep(interval)
-            current = _scan_signature(root)
-            if current == last:
-                continue
-            time.sleep(interval)  # debounce: let a save-burst settle
-            current = _scan_signature(root)
-            changed_count = len(set(current) ^ set(last))
-            echo(f"\nchange detected ({changed_count} entries) — updating memory")
-            stats = incremental_update(root, provider, echo=echo)
-            # keep driving toward FINISHED: rebuild missing/invalid judgment
-            # too, so a running session converges without a relaunch
-            ensure_judgment(root, provider, echo=echo)
-            echo(
-                f"updated: {stats.summarized} files re-summarized, "
-                f"{stats.features} features traced"
-            )
-            last = current
+        while not stop.is_set():
+            try:
+                current = _scan_signature(root)
+                if not initialized:
+                    initialized = True
+                    if (memory_dir / "graph.json").is_file():
+                        last = current
+                        report("running", attempts=0)
+                if current != last or failures:
+                    if last is not None and not failures:
+                        if stop.wait(interval):
+                            break
+                        current = _scan_signature(root)  # debounce save bursts
+                    echo("watch: synchronizing pending source changes")
+                    stats = incremental_update(root, provider, echo=echo)
+                    ensure_judgment(root, provider, echo=echo)
+                    last = current
+                    failures = 0
+                    report("running", attempts=0)
+                    echo(f"updated: {stats.summarized} files re-summarized, {stats.features} features traced")
+                if stop.wait(interval):
+                    break
+            except Exception as exc:
+                failures += 1
+                delay = min(60.0, max(1.0, interval) * 2 ** min(failures - 1, 6))
+                echo(f"watch: update failed ({type(exc).__name__}: {exc}); retrying in {delay:g}s")
+                report("retrying", error=f"{type(exc).__name__}: {exc}"[:300],
+                       attempts=failures, retry_in=delay)
+                if stop.wait(delay):
+                    break
     except KeyboardInterrupt:
         echo("\ncms watch stopped.")
+    finally:
+        report("stopped", attempts=failures)

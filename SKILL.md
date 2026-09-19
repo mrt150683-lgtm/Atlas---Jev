@@ -51,13 +51,17 @@ attached or a `.memory/` dir exists, use the tools below first.
 This is the loop Atlas exists to serve. `declare_intent` + `check_alignment` are
 the input and the honest-finish of a change; everything else is grounding.
 
-## 3. MCP tools (37) — the primary agent surface
+## 3. MCP tools (38) — the primary agent surface
 
 Server id `cms` (stdio JSON-RPC). Every call is logged to
 `.memory/activity.jsonl` and rendered live in the UI (glow pulses + a badge —
 the human can literally watch you think). Tools:
 
 **Grounding / read**
+- `get_context_decision(receipt_id=None)` — inspect the context receipt from a
+  query or task brief; omit the id for recent decisions and project readiness.
+  Local rank, Jev's proposal and the delivered selection are distinct. A model
+  relevance estimate is never proof of a dependency, behavior, or completion.
 - `query_codebase(query, top_k=5)` — plain-language search ("where is the ignore
   filtering?"). Returns ranked nodes: `node_id, kind, name, path, lines, score,
   summary, calls, called_by`. Your first move on any unfamiliar area.
@@ -484,6 +488,37 @@ still produce `unstated-change`. `related_not_touched` is advisory context and
 does not lower the verdict.
 
 ## 10. Configuration
+
+### Optional Jev context decisions
+
+Atlas's Jev integration is controlled by the local, untracked
+`.atlas-decisions.json` file. It defaults to `off`. `shadow` evaluates a bounded
+shortlist but delivers local results; `assist` can reorder it while preserving
+explicit mapped targets and a local lead in larger packs. Either cloud mode
+also requires `allow_cloud: true` and `TYPESAFE_API_KEY` in the process environment.
+Do not turn this on, change the owner's mode, or add credentials just because a
+skill was loaded. Source and project context may be private.
+
+`query_codebase` retains its list shape; each result's `selection` includes the
+receipt id, selection status, relevance estimate and source freshness. Task
+briefs and Ask Atlas carry `context_selection`. Fetch the full receipt when
+the selection matters; do not load the entire history into every prompt.
+
+`no_match` means Jev abstained; returned local results are for inspection, not
+endorsed matches. `fallback` means Atlas retained local results after an error,
+stale source, missing permission or a policy change. Explicitly report these
+limitations when material. A receipt is a historical snapshot, not a promise
+that files are still unchanged. Read current source and use the existing
+verification/approved-intent loop. Never replace verification with Jev scores.
+
+Human counterpart: **Screens → Context decisions** (`/context`), with exact
+receipt links from Ask Atlas. CLI: `cms context "task"`, `cms context --receipt
+<id>`. Evaluation: `cms context-evaluate cases.json --out report.json`; use
+independent labels, distinguish shortlist recall from model ranking, and never
+claim coding improvements from retrieval metrics alone.
+
+Architecture, rollout and evaluation protocol:
+[`docs/JEV_INTEGRATION.md`](docs/JEV_INTEGRATION.md).
 
 Config file `~/.cms/config.json` (secrets masked by `cms config show`); env vars
 always override. Keys / env:

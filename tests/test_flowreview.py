@@ -113,14 +113,13 @@ def test_verified_is_computed_never_asserted(proj) -> None:
     assert any(e["kind"] == "context" for f in rv_smear["flows"]
                for s in f for e in s["evidence"])
 
-    # now give every step its OWN coverage -> computed verified is reached
+    # Synthetic mappings without current run provenance cannot establish behavior
     graph.nodes["func:app.py::greet"]["exercised_by"] = ["tests/test_app.py::test_greet"]
     graph.nodes["func:app.py::helper"]["exercised_by"] = ["tests/test_app.py::test_greet"]
     graph.nodes["feature:Greeting"].pop("flow_review", None)
     rv = build_flow_review(root, graph, AnalysisProvider(status="verified"), "Greeting")
-    assert rv["status"] == "verified"
-    assert all(any(e["kind"] == "coverage" for e in s["evidence"])
-               for f in rv["flows"] for s in f if s["in_feature"])
+    assert rv["status"] == "insufficient_runtime_evidence"
+    assert rv["completion_proven"] is False
 
     # same claim WITHOUT any coverage: never verified
     del graph.nodes["feature:Greeting"]["exercised_by"]

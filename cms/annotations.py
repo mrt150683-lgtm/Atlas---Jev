@@ -19,12 +19,13 @@ from default listings and from model context packs.
 from __future__ import annotations
 
 import subprocess
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .storage import locked_store, read_json
+import uuid
 from .notes import NotesStore
-from .semantic_state import atomic_write_json
+from .storage import atomic_write_json
 
 ANNOTATIONS_FILE = "annotations.json"
 
@@ -102,12 +103,7 @@ class AnnotationStore:
     # -- persistence -------------------------------------------------------
 
     def _read(self) -> list[dict]:
-        import json
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return []
-        return data.get("annotations", []) if isinstance(data, dict) else []
+        return read_json(self.path, {"annotations": []}, rows="annotations")["annotations"]
 
     def _write(self, annotations: list[dict]) -> None:
         self.memory_dir.mkdir(parents=True, exist_ok=True)
@@ -193,6 +189,7 @@ class AnnotationStore:
 
     # -- mutations ----------------------------------------------------------
 
+    @locked_store()
     def add(self, target, type: str, body: str, *, author: dict | None = None,
             payload: dict | None = None, confidence: float | None = None,
             priority: str = "normal", evidence: list | None = None,
@@ -206,7 +203,7 @@ class AnnotationStore:
             author["kind"] = "user"
         author.setdefault("identity", author["kind"])
         entry = {
-            "id": f"ann-{int(time.time() * 1000):x}-{len(self._read()) % 997:03d}",
+            "id": f"ann-{uuid.uuid4().hex}",
             "target": target_key,
             "target_kind": target_kind,
             "type": type if type in TYPES else "note",
@@ -238,6 +235,7 @@ class AnnotationStore:
         self._write(annotations)
         return entry
 
+    @locked_store()
     def set_status(self, ann_id: str, status: str, *, reason: str = "") -> dict | None:
         if status not in STATUSES:
             raise ValueError(f"unknown status {status!r}; expected one of {', '.join(STATUSES)}")
@@ -256,6 +254,7 @@ class AnnotationStore:
                 return a
         return None
 
+    @locked_store()
     def edit_body(self, ann_id: str, body: str) -> dict | None:
         """User-authored bodies may be edited in place; model-authored bodies
         are immutable — correcting a model observation means superseding it,

@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import ACTIVE_STATUSES, FINDING_STATUSES
+from ..storage import read_json, atomic_write_json, locked_store
 
 SENTINEL_DIR = "sentinel"
 MAX_SCAN_HISTORY = 20
@@ -35,16 +36,10 @@ class SentinelStore:
     # -- raw io -----------------------------------------------------------
 
     def _read(self, path: Path, default):
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            return default
+        return read_json(path, default)
 
     def _write(self, path: Path, data) -> None:
-        self.dir.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=1), encoding="utf-8")
-        tmp.replace(path)
+        atomic_write_json(path, data)
 
     # -- findings ---------------------------------------------------------
 
@@ -52,6 +47,7 @@ class SentinelStore:
         """fingerprint -> finding (with status/first_seen/last_seen/bug_id)."""
         return self._read(self.findings_path, {})
 
+    @locked_store("findings_path")
     def merge_scan(self, scan: dict) -> dict[str, dict]:
         """Fold a scan's findings into the persistent set and save everything.
 
@@ -91,7 +87,10 @@ class SentinelStore:
             if m not in (scan.get("module_errors") or {})
         }
         for fp, finding in stored.items():
-            if (fp not in seen and finding.get("module") in clean_modules
+            owner = finding.get("module")
+            if owner == "runner" and finding.get("pattern", "").startswith("module-error-"):
+                owner = finding["pattern"][len("module-error-"):]
+            if (fp not in seen and owner in clean_modules
                     and finding.get("status") in ACTIVE_STATUSES):
                 finding["status"] = "resolved"
                 finding["status_reason"] = "no longer detected (module ran clean)"
@@ -100,6 +99,7 @@ class SentinelStore:
         self._save_scan(scan, stored)
         return stored
 
+    @locked_store("findings_path")
     def set_status(self, finding_id: str, status: str, reason: str = "") -> dict | None:
         """Update one finding's status by id or fingerprint. False positives
         require a reason. Returns the updated finding, or None if unknown."""
@@ -141,7 +141,7 @@ class SentinelStore:
         self._write(self.scans_path, history[-MAX_SCAN_HISTORY:])
 
     def latest_scan(self) -> dict | None:
-        return self._read(self.latest_path, None)
+        return self._read(self.latest_path, {}) or None
 
     def scan_history(self) -> list[dict]:
         return self._read(self.scans_path, [])

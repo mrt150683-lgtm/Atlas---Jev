@@ -23,6 +23,7 @@ Honesty rules (same contract as the per-project semantic layer):
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import time
 from collections import Counter
@@ -31,6 +32,8 @@ from pathlib import Path
 from . import config
 from . import semantic_state as ss
 from .providers import SummaryProvider
+from .storage import atomic_write_json, read_json, locked_path, atomic_text
+from .prompting import EVIDENCE_RULES
 
 REGISTRY_PATH = Path.home() / ".cms" / "projects.json"
 FUSION_DIR = Path.home() / ".cms" / "fusion"
@@ -83,15 +86,17 @@ marketing language.
 """
 
 
+FUSION_PROMPT += EVIDENCE_RULES
+REFINE_PROMPT += EVIDENCE_RULES
+
+
 # ── registry ─────────────────────────────────────────────────────────────
 
 def load_registry() -> dict:
-    try:
-        return json.loads(REGISTRY_PATH.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
+    return read_json(REGISTRY_PATH, {})
 
 
+@locked_path(lambda: REGISTRY_PATH)
 def register_project(root: Path) -> None:
     """Record a mapped project (called after every successful build). Silent
     on failure — the registry is convenience, never load-bearing.
@@ -119,7 +124,7 @@ def register_project(root: Path) -> None:
                       if not (Path(r) / config.MEMORY_DIR_NAME / "graph.json").is_file()]:
             del projects[stale]
         REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
-        ss.atomic_write_json(REGISTRY_PATH, reg)
+        atomic_write_json(REGISTRY_PATH, reg)
     except OSError:
         pass
 
@@ -225,6 +230,20 @@ def structural_overlaps(cards: list[dict]) -> list[dict]:
 
 # ── fusion synthesis ─────────────────────────────────────────────────────
 
+def _unique_cards(cards: list[dict]) -> list[dict]:
+    counts = Counter(card["name"] for card in cards)
+    result = []
+    for source in cards:
+        card = dict(source)
+        card["project_id"] = str(Path(card["root"]).resolve())
+        card["display_name"] = card["name"]
+        if counts[card["name"]] > 1:
+            card["name"] += " [" + hashlib.sha256(card["project_id"].encode()).hexdigest()[:8] + "]"
+        result.append(card)
+    return result
+
+
+@locked_path(lambda: FUSION_DIR / "latest.json")
 def build_fusion(roots: list[Path], provider: SummaryProvider,
                  max_items: int = 6) -> dict:
     """Build the cross-project fusion report. Raises FusionError on provider
@@ -232,7 +251,7 @@ def build_fusion(roots: list[Path], provider: SummaryProvider,
     if provider.name == "mock":
         raise FusionError("fusion requires a real provider — mock cannot author "
                           "integration analysis (configure an API key)")
-    cards = [build_card(r) for r in roots]
+    cards = _unique_cards([build_card(r) for r in dict.fromkeys(roots)])
     ready = [c for c in cards if c.get("ready")]
     excluded = [c for c in cards if not c.get("ready")]
     if len(ready) < 2:
@@ -252,7 +271,7 @@ def build_fusion(roots: list[Path], provider: SummaryProvider,
         raw = provider.summarize(prompt, {"max_tokens": FUSION_MAX_TOKENS})
     except Exception as exc:
         raise FusionError(f"provider call failed: {type(exc).__name__}: {exc}") from exc
-    sections = _parse_fusion_json(raw, max_items)
+    sections = _parse_fusion_json(raw, max_items, ready)
 
     report = {
         "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -265,16 +284,14 @@ def build_fusion(roots: list[Path], provider: SummaryProvider,
         **sections,
     }
     FUSION_DIR.mkdir(parents=True, exist_ok=True)
-    ss.atomic_write_json(FUSION_DIR / "latest.json", report)
-    (FUSION_DIR / "latest.md").write_text(render_fusion_md(report), encoding="utf-8")
+    atomic_write_json(FUSION_DIR / "latest.json", report)
+    atomic_text(FUSION_DIR / "latest.md", render_fusion_md(report))
     return report
 
 
 def load_fusion() -> dict | None:
-    try:
-        return json.loads((FUSION_DIR / "latest.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
+    path = FUSION_DIR / "latest.json"
+    return read_json(path, {}) if path.exists() else None
 
 
 def fusion_history(limit: int = 12) -> list[dict]:
@@ -293,7 +310,7 @@ def fusion_history(limit: int = 12) -> list[dict]:
     return out[-limit:]
 
 
-def _parse_fusion_json(raw: str, max_items: int) -> dict:
+def _parse_fusion_json(raw: str, max_items: int, cards: list[dict] | None = None) -> dict:
     match = re.search(r"\{[\s\S]*\}", raw)
     if match is None:
         raise FusionError("provider returned no JSON object (malformed fusion output)")
@@ -301,13 +318,30 @@ def _parse_fusion_json(raw: str, max_items: int) -> dict:
         parsed = json.loads(match.group(0))
     except json.JSONDecodeError as exc:
         raise FusionError(f"provider returned invalid JSON: {exc}") from exc
-    return {
-        key: [dict(i, provenance="llm") for i in (parsed.get(key) or [])[:max_items]
-              if isinstance(i, dict)]
-        for key in ("integrations", "emergent", "conflicts")
-    }
+    keys = ("integrations", "emergent", "conflicts")
+    if not isinstance(parsed, dict) or any(not isinstance(parsed.get(key), list) for key in keys):
+        raise FusionError("fusion output must contain integrations, emergent and conflicts arrays")
+    names = {c["name"] for c in cards or []}
+    features = {f["name"] for c in cards or [] for f in c.get("features", [])}
+    output = {}
+    for key in keys:
+        rows = parsed[key][:min(20, max(1, int(max_items)))]
+        for item in rows:
+            if not isinstance(item, dict) or not isinstance(item.get("title"), str) or not item["title"].strip() or not isinstance(item.get("description"), str):
+                raise FusionError("fusion items require a title and description")
+            projects = item.get("projects")
+            if not isinstance(projects, list) or any(not isinstance(p, str) for p in projects) or len(set(projects)) < 2:
+                raise FusionError("fusion items must cite at least two distinct project names")
+            if cards and (set(projects) - names):
+                raise FusionError("fusion output cites a project absent from the evidence")
+            cited = item.get("features", [])
+            if not isinstance(cited, list) or any(not isinstance(f, str) for f in cited) or (cards and set(cited) - features):
+                raise FusionError("fusion output cites a feature absent from the evidence")
+        output[key] = [dict(item, provenance="llm") for item in rows]
+    return output
 
 
+@locked_path(lambda: FUSION_DIR / "latest.json")
 def refine_fusion(direction: str, provider: SummaryProvider,
                   max_items: int = 6) -> dict:
     """Revise the latest fusion report per the owner's direction (the
@@ -324,7 +358,7 @@ def refine_fusion(direction: str, provider: SummaryProvider,
         raise FusionError("no fusion report yet — run `cms fuse` first")
 
     roots = [Path(info["root"]) for info in (report.get("projects") or {}).values()]
-    cards = [c for c in (build_card(r) for r in roots) if c.get("ready")]
+    cards = _unique_cards([c for c in (build_card(r) for r in roots) if c.get("ready")])
     if len(cards) < 2:
         raise FusionError("fewer than 2 member projects still have recorded "
                           "discovery — re-run `cms fuse`")
@@ -342,7 +376,7 @@ def refine_fusion(direction: str, provider: SummaryProvider,
         raw = provider.summarize(prompt, {"max_tokens": FUSION_MAX_TOKENS})
     except Exception as exc:
         raise FusionError(f"provider call failed: {type(exc).__name__}: {exc}") from exc
-    sections = _parse_fusion_json(raw, max_items)  # raises before any overwrite
+    sections = _parse_fusion_json(raw, max_items, cards)  # raises before any overwrite
 
     new_report = {
         **report, **sections,
@@ -359,8 +393,8 @@ def refine_fusion(direction: str, provider: SummaryProvider,
     with open(FUSION_DIR / "history.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps({"generated_at": new_report["generated_at"],
                             "direction": direction, "report": new_report}) + "\n")
-    ss.atomic_write_json(FUSION_DIR / "latest.json", new_report)
-    (FUSION_DIR / "latest.md").write_text(render_fusion_md(new_report), encoding="utf-8")
+    atomic_write_json(FUSION_DIR / "latest.json", new_report)
+    atomic_text(FUSION_DIR / "latest.md", render_fusion_md(new_report))
     return new_report
 
 

@@ -8,6 +8,10 @@ provider, model, input hash, and seed provenance.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+from functools import wraps
+import threading
+from .storage import locked_store, transaction
 import hashlib
 import json
 import os
@@ -20,8 +24,9 @@ from pathlib import Path
 
 from . import config
 from .providers import SummaryProvider
+from .prompting import EVIDENCE_RULES, evidence_json
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 IDEA_KINDS = ("project", "feature", "tool", "module", "agent_flow",
               "experiment", "question", "concept")
 IDEA_STATUSES = ("inbox", "exploring", "promising", "planned", "building",
@@ -43,8 +48,9 @@ MODE: {mode}
 DIRECTION: {direction}
 SURPRISE: {surprise:.2f} (0 = coherent extension, 1 = bold but still useful)
 
-EVIDENCE PACK:
+<evidence_json>
 {context}
+</evidence_json>
 
 Avoid near-duplicates of existing ideas and respect rejected/parked directions.
 Use the named projects and feature capabilities exactly; do not invent evidence.
@@ -54,6 +60,19 @@ missing_capability, risks (array of strings), first_experiment.
 Kinds: project, feature, tool, module, agent_flow, experiment, question, concept.
 Each overview should explain a useful concept in 2-4 concrete sentences.
 """
+
+GEN_PROMPT += EVIDENCE_RULES
+
+
+def _mutation(fn):
+    @wraps(fn)
+    def run(self, *args, **kwargs):
+        with transaction(self.path):
+            with self._connect() as conn:
+                if not conn.in_transaction:
+                    conn.execute("BEGIN IMMEDIATE")
+                return fn(self, *args, **kwargs)
+    return run
 
 
 class IdeaError(ValueError):
@@ -103,22 +122,36 @@ class IdeaJournal:
         self.directory = Path(directory or config.IDEAS_USER_DIR)
         self.path = self.directory / "journal.db"
         self.directory.mkdir(parents=True, exist_ok=True)
+        self._connection_state = threading.local()
         self._migrate()
 
-    def _connect(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.path, timeout=10)
+    @contextmanager
+    def _connect(self):
+        current = getattr(self._connection_state, "connection", None)
+        if current is not None:
+            yield current
+            return
+        conn = sqlite3.connect(self.path, timeout=30)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute("PRAGMA journal_mode = WAL")
-        return conn
+        self._connection_state.connection = conn
+        try:
+            with conn:
+                yield conn
+        finally:
+            self._connection_state.connection = None
+            conn.close()
 
+    @locked_store()
     def _migrate(self) -> None:
         with self._connect() as conn:
+            conn.execute("PRAGMA journal_mode = WAL")
             version = int(conn.execute("PRAGMA user_version").fetchone()[0])
             if version > SCHEMA_VERSION:
                 raise IdeaError(f"journal schema {version} is newer than this Atlas build")
             if version < 1:
                 conn.executescript("""
+                    BEGIN IMMEDIATE;
                     CREATE TABLE ideas (
                         id TEXT PRIMARY KEY,
                         title TEXT NOT NULL,
@@ -207,7 +240,14 @@ class IdeaJournal:
                     );
                     CREATE INDEX events_entity_idx ON events(entity_type, entity_id, created_at);
                     PRAGMA user_version = 1;
+                    COMMIT;
                 """)
+            if version < 2:
+                with conn:
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute("ALTER TABLE generation_runs ADD COLUMN prompt_text TEXT NOT NULL DEFAULT ''")
+                    conn.execute("ALTER TABLE generation_runs ADD COLUMN response_text TEXT NOT NULL DEFAULT ''")
+                    conn.execute("PRAGMA user_version = 2")
 
     def _event(self, conn: sqlite3.Connection, entity_type: str, entity_id: str,
                action: str, actor_kind: str, payload: dict | None = None) -> None:
@@ -231,6 +271,7 @@ class IdeaJournal:
             current = row[0] if row else None
         return False
 
+    @_mutation
     def create_idea(self, title: str, *, overview: str = "", body: str = "",
                     kind: str = "concept", status: str = "inbox",
                     parent_id: str | None = None, origin: str = "user",
@@ -259,6 +300,7 @@ class IdeaJournal:
                         {"title": title, "origin": origin})
         return self.get_idea(iid)
 
+    @_mutation
     def update_idea(self, idea_id: str, *, title=None, overview=None, body=None,
                     kind=None, status=None, parent_id=_UNSET,
                     actor_kind: str = "human") -> dict:
@@ -297,6 +339,7 @@ class IdeaJournal:
                         {k: v for k, v in values.items() if v != current.get(k)})
         return self.get_idea(idea_id)
 
+    @_mutation
     def add_source(self, content: str, *, idea_id: str | None = None,
                    source_type: str = "brainstorm", title: str = "",
                    uri: str = "", actor_kind: str = "human") -> dict:
@@ -321,6 +364,7 @@ class IdeaJournal:
                         {"idea_id": idea_id, "content_hash": digest})
         return self.get_source(sid)
 
+    @_mutation
     def add_relationship(self, source_idea_id: str, target_type: str,
                          target_ref: str, relation_type: str = "relates_to",
                          metadata: dict | None = None,
@@ -354,6 +398,16 @@ class IdeaJournal:
                          "relation_type": relation_type})
             row = conn.execute("SELECT * FROM relationships WHERE id=?", (rid,)).fetchone()
         return self._relationship_dict(row)
+
+    @_mutation
+    def remove_relationship(self, relationship_id: str) -> dict:
+        with self._connect() as conn:
+            row = conn.execute("SELECT * FROM relationships WHERE id=?", (relationship_id,)).fetchone()
+            if row is None:
+                raise IdeaError(f"unknown relationship {relationship_id!r}")
+            conn.execute("DELETE FROM relationships WHERE id=?", (relationship_id,))
+            self._event(conn, "relationship", relationship_id, "removed", "viewer", dict(row))
+        return {"removed": relationship_id}
 
     @staticmethod
     def _relationship_dict(row: sqlite3.Row | None) -> dict | None:
@@ -486,6 +540,7 @@ class IdeaJournal:
             out.append(item)
         return out
 
+    @_mutation
     def propose_candidate(self, title: str, overview: str, *, kind: str = "concept",
                           payload: dict | None = None, origin: str = "agent",
                           generation_id: str | None = None,
@@ -514,6 +569,7 @@ class IdeaJournal:
         out["payload"] = json.loads(out.pop("payload_json") or "{}")
         return out
 
+    @_mutation
     def decide_candidate(self, candidate_id: str, verdict: str, *,
                          parent_id: str | None = None,
                          merge_into: str | None = None) -> dict:
@@ -522,6 +578,12 @@ class IdeaJournal:
         candidate = self.get_candidate(candidate_id)
         if candidate is None:
             raise IdeaError(f"unknown candidate {candidate_id!r}")
+        if candidate["status"] in ("accepted", "merged"):
+            if candidate["status"] == verdict and (verdict != "merged" or merge_into == candidate["accepted_idea_id"]):
+                return candidate
+            raise IdeaError("candidate already promoted; edit the resulting idea instead")
+        if candidate["status"] == verdict:
+            return candidate
         accepted_id = None
         if verdict == "accepted":
             idea = self.create_idea(candidate["title"], overview=candidate["overview"],
@@ -593,7 +655,9 @@ class IdeaJournal:
                 target = (f"idea:{rel['target_ref']}" if rel["target_type"] == "idea"
                           else f"{rel['target_type']}:{rel['target_ref']}")
                 edges.append({"source": f"idea:{rel['source_idea_id']}", "target": target,
-                              "type": rel["relation_type"], "metadata": rel["metadata"]})
+                              "type": rel["relation_type"], "metadata": rel["metadata"],
+                              "stale": bool(rel.get("stale")),
+                              "target_present": rel.get("target_present", True)})
         return {"nodes": nodes, "edges": edges, "generated_at": _now()}
 
     def resolve_nodes(self, node_ids: list[str]) -> list[dict]:
@@ -604,6 +668,15 @@ class IdeaJournal:
             raise IdeaError(f"unknown map node(s): {', '.join(missing[:4])}")
         return [by_id[nid] for nid in node_ids]
 
+    def _context_idea(self, idea: dict, *, selected: bool = False) -> dict:
+        out = {k: idea.get(k) for k in ("id", "title", "overview", "body", "kind", "status", "parent_id")}
+        out["explicitly_selected"] = selected
+        with self._connect() as conn:
+            out["sources"] = [dict(row) for row in conn.execute(
+                "SELECT id, source_type, title, content, content_hash FROM sources WHERE idea_id=? ORDER BY created_at DESC",
+                (idea["id"],))]
+        return out
+
     def build_context(self, *, direction: str = "", project_roots: list[str] | None = None,
                       feature_refs: list[str] | None = None,
                       idea_ids: list[str] | None = None,
@@ -612,6 +685,11 @@ class IdeaJournal:
                     "features": [], "selected_nodes": selected_nodes or [],
                     "feedback": {"liked": [], "avoid": []}, "fusion": [], "scout": []}
         selected = set(idea_ids or [])
+        for idea_id in dict.fromkeys(idea_ids or []):
+            idea = self.get_idea(idea_id, include_events=False)
+            if idea is None:
+                raise IdeaError(f"unknown selected idea {idea_id!r}")
+            evidence["ideas"].append(self._context_idea(idea, selected=True))
         # Generation must always see recent journal history, even when the user's
         # direction uses entirely new vocabulary. Directional matches are ranked
         # first, then recent entries fill the bounded evidence pack.
@@ -619,13 +697,13 @@ class IdeaJournal:
         seen = {hit["id"] for hit in hits}
         hits.extend(hit for hit in self.search(limit=30) if hit["id"] not in seen)
         for hit in hits:
-            if hit["id"] in selected or len(evidence["ideas"]) < 20:
-                evidence["ideas"].append({k: hit[k] for k in
-                                          ("id", "title", "overview", "kind", "status", "parent_id")})
+            if hit["id"] not in selected and len(evidence["ideas"]) < max(20, len(selected)):
+                evidence["ideas"].append(self._context_idea(hit))
         try:
             from .fuse import build_card, load_fusion, load_registry
 
-            roots = project_roots or []
+            roots = list(project_roots or [])
+            roots += [ref.rpartition("::")[0] for ref in feature_refs or [] if "::" in ref]
             if not roots and selected_nodes:
                 roots = [n["ref"] for n in selected_nodes if n["type"] == "project"]
                 roots += [n.get("project") for n in selected_nodes if n["type"] == "feature"]
@@ -643,16 +721,20 @@ class IdeaJournal:
             pass
         for ref in feature_refs or []:
             root_str, sep, name = ref.rpartition("::")
-            if sep:
-                evidence["features"].append({"project": root_str, "name": name})
+            if not sep:
+                raise IdeaError(f"invalid selected feature reference {ref!r}")
+            card = next((c for c in evidence["projects"] if Path(c["root"]).resolve() == Path(root_str).resolve()), None)
+            feature = next((f for f in (card or {}).get("features", []) if f.get("name") == name), None)
+            if feature is None:
+                raise IdeaError(f"selected feature is missing from mapped evidence: {ref}")
+            evidence["features"].append({"project": root_str, **feature})
         if selected_nodes:
             evidence["features"] += [n for n in selected_nodes if n["type"] == "feature"]
             for n in selected_nodes:
                 if n["type"] == "idea":
                     idea = self.get_idea(n["ref"], include_events=False)
                     if idea and not any(i["id"] == idea["id"] for i in evidence["ideas"]):
-                        evidence["ideas"].append({k: idea.get(k) for k in
-                                                  ("id", "title", "overview", "kind", "status", "parent_id")})
+                        evidence["ideas"].append(self._context_idea(idea, selected=True))
         try:
             from .scout import load_cards, load_suggestions
             evidence["scout"] = [
@@ -679,7 +761,7 @@ class IdeaJournal:
                  idea_ids: list[str] | None = None,
                  selected_nodes: list[dict] | None = None,
                  surprise: float = 0.5, count: int = 6,
-                 seed: int | None = None) -> dict:
+                 seed: int | None = None, _join_path: dict | None = None) -> dict:
         if provider.name == "mock":
             raise IdeaError("idea generation needs a real provider (configure an API key)")
         if mode not in GENERATION_MODES:
@@ -690,7 +772,15 @@ class IdeaJournal:
         context = self.build_context(direction=direction, project_roots=project_roots,
                                      feature_refs=feature_refs, idea_ids=idea_ids,
                                      selected_nodes=selected_nodes)
-        context_text = json.dumps(context, ensure_ascii=False, indent=2)[:70_000]
+        if mode == "project" and (len(context["projects"]) != 1 or not context["projects"][0].get("ready")):
+            raise IdeaError("One project generation requires exactly one selected mapped project")
+        if mode == "cross_project" and len([c for c in context["projects"] if c.get("ready")]) < 2:
+            raise IdeaError("Cross-project generation requires at least two selected projects")
+        try:
+            context_text = evidence_json(context, 70_000)
+        except ValueError as exc:
+            raise IdeaError(str(exc)) from exc
+        context = json.loads(context_text)
         prompt = GEN_PROMPT.format(mode=mode, direction=direction or "Discover worthwhile directions",
                                    surprise=surprise, context=context_text, count=count)
         try:
@@ -711,23 +801,32 @@ class IdeaJournal:
             item = dict(item)
             item["title"], item["overview"] = title, overview
             item["kind"] = item.get("kind") if item.get("kind") in IDEA_KINDS else "concept"
-            item["contributions"] = [str(v)[:500] for v in (item.get("contributions") or [])][:12]
-            item["risks"] = [str(v)[:500] for v in (item.get("risks") or [])][:12]
+            if any(not isinstance(item.get(key, []), list) or any(not isinstance(v, str) for v in item.get(key, []))
+                   for key in ("contributions", "risks")):
+                raise IdeaError("candidate contributions and risks must be arrays of strings")
+            item["contributions"] = [v[:500] for v in item.get("contributions", [])][:12]
+            item["risks"] = [v[:500] for v in item.get("risks", [])][:12]
             normalized.append(item)
         if not normalized:
             raise IdeaError("provider returned no usable structured candidates")
         run_id, now = _id("gen"), _now()
-        input_hash = hashlib.sha256((prompt + raw).encode()).hexdigest()[:24]
-        with self._connect() as conn:
-            conn.execute("INSERT INTO generation_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        input_hash = hashlib.sha256(prompt.encode()).hexdigest()[:24]
+        with transaction(self.path), self._connect() as conn:
+            conn.execute("INSERT INTO generation_runs VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                          (run_id, mode, _clean_text(direction, 4000), provider.name,
-                          getattr(provider, "model", None), surprise, seed,
-                          _json(context), input_hash, now))
+                          getattr(provider, "model", None), 0.25 + surprise * 0.75, seed,
+                          _json(context), input_hash, now, prompt, raw))
             self._event(conn, "generation", run_id, "completed", "model",
                         {"mode": mode, "count": len(normalized), "input_hash": input_hash})
-        candidates = [self.propose_candidate(
-            item["title"], item["overview"], kind=item["kind"], payload=item,
-            origin=mode, generation_id=run_id, actor_kind="model") for item in normalized]
+            candidates = [self.propose_candidate(
+                item["title"], item["overview"], kind=item["kind"], payload=item,
+                origin=mode, generation_id=run_id, actor_kind="model") for item in normalized]
+            if _join_path is not None:
+                conn.execute("INSERT INTO join_paths VALUES (?, ?, ?, ?, ?, ?, ?)",
+                             (_join_path["id"], run_id, seed, _json(_join_path["points"]),
+                              _json(_join_path["nodes"]), surprise, _now()))
+                self._event(conn, "join_path", _join_path["id"], "generated", "viewer",
+                            {"nodes": _join_path["nodes"], "seed": seed})
         return {"generation_id": run_id, "mode": mode, "seed": seed,
                 "input_hash": input_hash, "context": context, "candidates": candidates}
 
@@ -754,29 +853,36 @@ class IdeaJournal:
         path_text = " -> ".join(n["label"] for n in selected)
         steer = (direction + "\n" if direction else "") + \
             f"Join these dots in this exact order: {path_text}. Explain what every dot contributes."
+        path_id = _id("path")
         result = self.generate(provider, mode="join_dots", direction=steer,
                                selected_nodes=selected, surprise=surprise,
-                               count=count, seed=seed)
-        path_id = _id("path")
-        with self._connect() as conn:
-            conn.execute("INSERT INTO join_paths VALUES (?, ?, ?, ?, ?, ?, ?)",
-                         (path_id, result["generation_id"], seed, _json(points or []),
-                          _json([n["id"] for n in selected]), surprise, _now()))
-            self._event(conn, "join_path", path_id, "generated", "human",
-                        {"nodes": [n["id"] for n in selected], "seed": seed})
+                               count=count, seed=seed,
+                               _join_path={"id": path_id, "points": points or [],
+                                           "nodes": [n["id"] for n in selected]})
         result.update({"path_id": path_id, "selected_nodes": selected,
                        "path": path_text, "surprise": surprise})
         return result
 
     def snapshot(self) -> dict:
-        return {"schema_version": SCHEMA_VERSION, "exported_at": _now(),
-                "ideas": self.search(limit=10_000),
-                "candidates": self.list_candidates(limit=10_000),
-                "map": self.map_data(feature_limit=500),
-                "events": self.events(limit=10_000)}
+        """Complete portable snapshot from one SQLite read transaction, never UI limits."""
+        with self._connect() as conn:
+            conn.execute("BEGIN")
+            tables = ("ideas", "candidates", "sources", "relationships",
+                      "generation_runs", "join_paths", "events")
+            output = {"schema_version": SCHEMA_VERSION, "exported_at": _now(),
+                      "format": "atlas-idea-journal", "complete": True}
+            for table in tables:
+                records = [dict(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY id")]
+                for record in records:
+                    for key in list(record):
+                        if key.endswith("_json"):
+                            record[key[:-5]] = json.loads(record.pop(key))
+                output[table] = records
+            output["counts"] = {table: len(output[table]) for table in tables}
+            return output
 
 
-def migrate_legacy_brainstorm(journal: IdeaJournal, directory: Path | None = None) -> dict:
+def _migrate_legacy_brainstorm(journal: IdeaJournal, directory: Path | None = None) -> dict:
     """Import old Brainstorm one-liners once as candidates, never canonical ideas."""
     marker = journal.directory / ".brainstorm-migrated-v1"
     source = Path(directory or (Path.home() / ".cms" / "brainstorm")) / "ideas.json"
@@ -786,8 +892,13 @@ def migrate_legacy_brainstorm(journal: IdeaJournal, directory: Path | None = Non
         rows = json.loads(source.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {"imported": 0, "skipped": True}
+    with journal._connect() as conn:
+        existing = {_json(json.loads(row[0]).get("legacy")) for row in conn.execute(
+            "SELECT payload_json FROM candidates WHERE origin='legacy_brainstorm'")}
     imported = 0
     for item in (rows.values() if isinstance(rows, dict) else []):
+        if not isinstance(item, dict) or _json(item) in existing:
+            continue
         title = _clean_text(item.get("text"), 180)
         if not title:
             continue
@@ -800,8 +911,18 @@ def migrate_legacy_brainstorm(journal: IdeaJournal, directory: Path | None = Non
         elif status == "liked":
             journal.decide_candidate(candidate["id"], "parked")
         imported += 1
-    marker.write_text(_now(), encoding="utf-8")
     return {"imported": imported, "skipped": False}
+
+
+def migrate_legacy_brainstorm(journal: IdeaJournal, directory: Path | None = None) -> dict:
+    with transaction(journal.path):
+        with journal._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            result = _migrate_legacy_brainstorm(journal, directory)
+        if not result["skipped"]:
+            from .storage import atomic_text
+            atomic_text(journal.directory / ".brainstorm-migrated-v1", _now())
+        return result
 
 
 def default_journal() -> IdeaJournal:

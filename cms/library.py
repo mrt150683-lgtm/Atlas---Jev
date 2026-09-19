@@ -34,7 +34,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config
-from .semantic_state import atomic_write_json
+from .storage import atomic_write_json
+from .storage import locked_store, read_json, atomic_text
 
 INDEX_FILE = "index.json"
 VERSIONS_DIR = ".versions"
@@ -282,12 +283,11 @@ class LibraryStore:
     # -- index io ------------------------------------------------------------
 
     def _read_index(self) -> dict:
-        try:
-            data = json.loads(self.index_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            data = {}
-        if not isinstance(data, dict):
-            data = {}
+        data = read_json(self.index_path, {"assets": [], "overrides": {}}, rows="assets")
+        if not isinstance(data.get("assets", []), list) or any(not isinstance(r, dict) for r in data.get("assets", [])):
+            raise LibraryError("Invalid Library index; original preserved")
+        if not isinstance(data.get("overrides", {}), dict):
+            raise LibraryError("Invalid Library overrides; original preserved")
         data.setdefault("schema_version", SCHEMA_VERSION)
         data.setdefault("assets", [])
         data.setdefault("overrides", {})
@@ -443,17 +443,22 @@ class LibraryStore:
         snap = self.dir / VERSIONS_DIR / rec["id"] / f"v{vrec['version']}.md"
         if not snap.is_file():  # synthesized built-in: snapshot IS the file
             snap = self.dir / vrec.get("snapshot", f"{rec['id']}.md")
+        if not snap.resolve().is_relative_to(self.dir.resolve()):
+            raise LibraryError("snapshot path is outside its Library scope")
         try:
             meta, body, canon = canonical_text(snap.read_text(encoding="utf-8"),
                                                fallback_id=rec["id"])
         except OSError as exc:
             raise LibraryError(f"snapshot missing for {rec['id']!r} v{vrec['version']}") from exc
+        if vrec.get("content_hash") and _hash_text(canon) != vrec["content_hash"]:
+            raise LibraryError(f"snapshot integrity mismatch for {rec['id']!r}; restore the published version")
         return {"meta": meta, "body": body, "content": canon,
-                "content_hash": vrec.get("content_hash") or _hash_text(canon),
+                "content_hash": _hash_text(canon),
                 "version": vrec["version"], "draft": False}
 
     # -- mutations ---------------------------------------------------------------
 
+    @locked_store("index_path")
     def save_draft(self, text: str, *, created_by: dict | None = None,
                    trust: str | None = None, expect_id: str | None = None) -> dict:
         """Create or update a draft from raw asset text. The working file is
@@ -470,7 +475,7 @@ class LibraryStore:
         index = self._read_index()
         rec = next((r for r in index["assets"] if r.get("id") == meta["id"]), None)
         self.dir.mkdir(parents=True, exist_ok=True)
-        self.asset_path(meta["id"]).write_text(canon, encoding="utf-8")
+        atomic_text(self.asset_path(meta["id"]), canon)
         if rec is None:
             rec = self._blank_record(meta)
             rec["trust"] = trust or ("agent" if author["kind"] == "model" else
@@ -485,6 +490,7 @@ class LibraryStore:
         self._write_index(index)
         return {**rec, "scope": self.scope}
 
+    @locked_store("index_path")
     def register_file(self, asset_id: str, *, created_by: dict | None = None,
                       trust: str | None = None) -> dict:
         """Adopt a file already sitting in the folder into the index, as a
@@ -497,6 +503,7 @@ class LibraryStore:
         return self.save_draft(path.read_text(encoding="utf-8"),
                                created_by=created_by, trust=trust, expect_id=asset_id)
 
+    @locked_store("index_path")
     def publish(self, asset_id: str, published_by: str) -> dict:
         """Freeze the current draft as the next published version. Requires a
         human identity, exactly like decision approval."""
@@ -523,7 +530,7 @@ class LibraryStore:
         number = (versions[-1]["version"] + 1) if versions else 1
         snap = self.snapshot_path(asset_id, number)
         snap.parent.mkdir(parents=True, exist_ok=True)
-        snap.write_text(canon, encoding="utf-8")
+        atomic_text(snap, canon)
         versions.append({"version": number, "content_hash": chash,
                          "snapshot": str(snap.relative_to(self.dir)).replace("\\", "/"),
                          "published_at": _now_iso(),
@@ -535,6 +542,7 @@ class LibraryStore:
         self._write_index(index)
         return {**rec, "scope": self.scope}
 
+    @locked_store("index_path")
     def deprecate(self, asset_id: str) -> dict:
         self._guard_writable()
         index = self._read_index()
@@ -548,6 +556,7 @@ class LibraryStore:
         self._write_index(index)
         return {**rec, "scope": self.scope}
 
+    @locked_store("index_path")
     def set_enabled(self, asset_id: str, enabled: bool) -> dict:
         """Flip a local asset's enablement, or record an override for an
         asset inherited from a lower-precedence scope. Never deletes."""
@@ -707,16 +716,18 @@ class LibraryView:
             elif old_v is None and version is not None:
                 pins[asset_id] = (version, depth)
 
-        def resolution_meta(asset_id: str) -> dict | None:
+        def resolution_meta(asset_id: str, version: int | None) -> dict | None:
             hit = self.effective(asset_id)
             if hit is None:
                 return None
             rec, store, _ = hit
             try:
-                loaded = store.load_asset(rec, None, draft=not rec.get("versions"))
+                loaded = store.load_asset(rec, version, draft=not rec.get("versions"))
             except LibraryError:
                 return None
             return loaded["meta"]
+
+        prior_pins: dict[str, tuple[int | None, int]] = {}
 
         def walk(ref: str, depth: int, chain: tuple[str, ...]) -> None:
             try:
@@ -736,7 +747,18 @@ class LibraryView:
                 warnings.append({"kind": "missing-selection" if depth == 0
                                  else "missing-dependency", "id": asset_id})
                 return
-            meta = resolution_meta(asset_id)
+            pin = prior_pins.get(asset_id, pins[asset_id])[0]
+            rec, selected_store, enabled = self.effective(asset_id)
+            if not enabled:
+                warnings.append({"kind": "disabled-dependency", "id": asset_id})
+                return
+            if not rec.get("versions") and not include_drafts:
+                warnings.append({"kind": "unpublished-asset", "id": asset_id})
+                return
+            if rec.get("status") == "deprecated" and pin is None:
+                warnings.append({"kind": "deprecated-dependency", "id": asset_id})
+                return
+            meta = resolution_meta(asset_id, pin)
             if meta is None:
                 warnings.append({"kind": "unreadable-asset", "id": asset_id})
                 return
@@ -746,8 +768,18 @@ class LibraryView:
                 for member in meta.get("assets") or []:
                     walk(member, depth + 1, chain + (asset_id,))
 
-        for ref in selection:
-            walk(ref, 0, ())
+        # A later direct pin can replace a dependency pin. Rebuild the closure
+        # until both the selected versions and their own dependencies agree.
+        for _pass in range(50):
+            pins, visited, warnings = {}, set(), []
+            for ref in selection:
+                walk(ref, 0, ())
+            if pins == prior_pins:
+                break
+            prior_pins = dict(pins)
+        else:
+            return {"assets": [], "shadowed": [], "warnings": [{"kind": "unstable-version-closure"}],
+                    "conflicts": [], "est_chars": 0, "est_tokens": 0, "oversized": False}
 
         assets: list[dict] = []
         shadowed: list[dict] = []

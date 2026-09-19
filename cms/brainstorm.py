@@ -25,15 +25,17 @@ import re
 import time
 from pathlib import Path
 
-from . import semantic_state as ss
 from .providers import SummaryProvider
+from .storage import atomic_write_json, read_json, transaction, locked_path
+from .prompting import EVIDENCE_RULES
 
 BRAINSTORM_DIR = Path.home() / ".cms" / "brainstorm"
 IDEAS_PER_BATCH = 10
 GEN_MAX_TOKENS = 1500
 DEFAULT_TEMPERATURE = 1.0
 
-GEN_PROMPT = """You are a prolific concept generator producing GENUINELY NEW ideas for one builder.
+GEN_PROMPT = """You generate candidate concepts that differ meaningfully from the supplied prior work.
+Novelty outside this evidence is unknown; describe proposals, never proven inventions.
 
 {mode_block}
 {goals_block}
@@ -62,21 +64,20 @@ Its capabilities: {features}
 Ideas must EXTEND or SPRING FROM this project — but must still be new
 directions, not restatements of its existing capabilities."""
 
+GEN_PROMPT += EVIDENCE_RULES
+
 
 class BrainstormError(RuntimeError):
     """Real-provider generation failed; state is left untouched."""
 
 
 def _read(name: str, default):
-    try:
-        return json.loads((BRAINSTORM_DIR / name).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return default
+    return read_json(BRAINSTORM_DIR / name, default)
 
 
 def _write(name: str, payload) -> None:
     BRAINSTORM_DIR.mkdir(parents=True, exist_ok=True)
-    ss.atomic_write_json(BRAINSTORM_DIR / name, payload)
+    atomic_write_json(BRAINSTORM_DIR / name, payload)
 
 
 def load_ideas() -> dict:
@@ -89,6 +90,7 @@ def load_goals() -> list[dict]:
 
 # ── goals (the seven-click panel) ────────────────────────────────────────
 
+@locked_path(lambda: BRAINSTORM_DIR / "goals.json")
 def add_goal(text: str) -> list[dict]:
     text = (text or "").strip()
     if not text:
@@ -102,6 +104,7 @@ def add_goal(text: str) -> list[dict]:
     return goals
 
 
+@locked_path(lambda: BRAINSTORM_DIR / "goals.json")
 def remove_goal(gid: str) -> list[dict]:
     goals = [g for g in load_goals() if g["id"] != gid]
     _write("goals.json", goals)
@@ -189,7 +192,9 @@ def generate_ideas(provider: SummaryProvider, temperature: float = DEFAULT_TEMPE
         texts = json.loads(match.group(0))
     except json.JSONDecodeError as exc:
         raise BrainstormError(f"provider returned invalid JSON: {exc}") from exc
-    texts = [str(t).strip() for t in texts if str(t).strip()][:count]
+    if not isinstance(texts, list) or any(not isinstance(t, str) for t in texts):
+        raise BrainstormError("provider must return an array of idea strings")
+    texts = [t.strip() for t in texts if t.strip()][:min(20, max(1, count))]
     if not texts:
         raise BrainstormError("provider returned an empty idea list")
 
@@ -208,10 +213,18 @@ def generate_ideas(provider: SummaryProvider, temperature: float = DEFAULT_TEMPE
             "created_at": now, "provenance": "llm",
         }
         new.append(ideas[iid])
-    _write("ideas.json", ideas)
-    return new
+    with transaction(BRAINSTORM_DIR / "ideas.json"):
+        current = load_ideas()
+        retained = []
+        for entry in new:
+            if entry["id"] not in current:
+                current[entry["id"]] = entry
+                retained.append(entry)
+        _write("ideas.json", current)
+    return retained
 
 
+@locked_path(lambda: BRAINSTORM_DIR / "ideas.json")
 def rate_idea(iid: str, verdict: str) -> dict:
     if verdict not in ("liked", "disliked", "new"):
         raise BrainstormError("verdict must be liked | disliked | new")

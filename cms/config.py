@@ -38,6 +38,7 @@ DEFAULT_IGNORES: list[str] = [
     "*.egg",
     "venv/",
     ".venv/",
+    ".venv-atlas/",
     "env/",
     ".env/",
     "ENV/",
@@ -112,6 +113,7 @@ DEFAULT_IGNORES: list[str] = [
     ".claude/",
     "cms.workspace.json",
     ".cmsscope.json",
+    ".atlas-decisions.json",
     # Library published-version snapshots (immutable copies, not source)
     ".versions/",
 ]
@@ -233,4 +235,7 @@ def library_builtin_dir() -> Path:
     override = os.environ.get("CMS_LIBRARY_BUILTIN")
     if override:
         return Path(override)
+    packaged = Path(__file__).resolve().parent / "builtin_skills"
+    if packaged.is_dir():
+        return packaged
     return Path(__file__).resolve().parent.parent / LIBRARY_DIR_NAME
