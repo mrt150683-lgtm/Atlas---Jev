@@ -2,6 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<script>
+// Local HTML files cannot contact the project server. Do not start the app here.
+if (location.protocol === 'file:') location.replace('open-atlas.html');
+</script>
 <title>Atlas · Discovery</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <style>
@@ -161,7 +165,7 @@
     <code>cms fuse --refine "…"</code> · rebuild: <code>cms fuse</code> · more plans:
     <code>cms scout scan &lt;dir&gt;</code> then <code>cms scout review</code>.</div>
 </main>
-<script>
+<script type="text/atlas-app" id="atlas-page-source">
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c =>
   ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -427,6 +431,14 @@ const initial = (location.hash || "#integrations").slice(1);
 showTab(["integrations", "emergent", "conflicts", "ideas", "plans", "history", "brainstorm"]
   .includes(initial) ? initial : "integrations");
 loadFusion(); loadScout(); loadBrainstorm();
+</script>
+<script>
+(() => {
+  if (location.protocol === 'file:') return;
+  const app = document.createElement('script');
+  app.textContent = document.getElementById('atlas-page-source').textContent;
+  document.body.append(app);
+})();
 </script>
 </body>
 </html>

@@ -3,6 +3,11 @@
 Date: 2026-09-19. Branch: `codex/jev-integration`.
 Base commit: `eab1ac47a9ab8d508e7f08c5aab1ce985abd8b7e` plus the current working tree.
 
+Follow-up: the user subsequently reported a failure when opening the HTML
+directly. The browser check below covered only a served disposable project,
+not that launch path. See [launch recovery and real-project verification](atlas-launch-recovery-2026-09-19.md)
+for the correction, repaired runtime, subsequent tests and Git handover.
+
 ## Verdict
 
 **PASS for the tested integration contracts and local human flows; PARTIAL for

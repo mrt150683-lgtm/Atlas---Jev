@@ -25,6 +25,32 @@ jobs:
       - run: python -m pip install -e ".[dev]"
       - run: python -m pytest -q
 
+  interface:
+    name: Interface and file-open recovery
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      - run: node --test tests/*.cjs
+
+  windows-launch:
+    name: Windows source launcher
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - name: Set up the documented runtime
+        shell: cmd
+        run: |
+          set "CMS_PYTHON=%pythonLocation%\python.exe"
+          call Setup-Atlas.bat --no-pause
+      - name: Launch and HTTP boundary checks
+        run: .venv-atlas/Scripts/python -m pytest -q tests/test_launcher.py tests/test_viewer_boundaries.py tests/test_context_surfaces.py
+
   sentinel:
     name: Atlas Sentinel
     runs-on: ubuntu-latest

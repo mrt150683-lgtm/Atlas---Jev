@@ -1,6 +1,6 @@
 <h1>▲ Atlas</h1>
 
-[![CI](https://github.com/mrt150683-lgtm/atlas-cms/actions/workflows/ci.yml/badge.svg)](https://github.com/mrt150683-lgtm/atlas-cms/actions/workflows/ci.yml)
+[![CI](https://github.com/mrt150683-lgtm/Atlas---Jev/actions/workflows/ci.yml/badge.svg)](https://github.com/mrt150683-lgtm/Atlas---Jev/actions/workflows/ci.yml)
 
 **Every codebase, mapped. One ground truth that AI agents and people read the same way.**
 
@@ -93,6 +93,16 @@ nothing shown to the human is ever simplified away from the model.
 
 ## Install
 
+On Windows, run **Setup-Atlas.bat** once, then double-click **CMS.bat**.
+Setup installs this checkout into its own `.venv-atlas` runtime; normal launch
+does not download packages. Keep the launcher window open while using Atlas.
+For the CLI examples below, Windows source users can replace `cms` with
+`.\CMS.bat`, or activate `.venv-atlas` first.
+
+Atlas is a local application served at an `http://127.0.0.1:...` address.
+Opening `cms/ui_assets/index.html` directly cannot run its backend. Local HTML
+opens a recovery page with the correct launch steps instead of a broken map.
+
 ```bash
 pip install -e .            # core (networkx, pathspec, typer)
 pip install -e ".[anthropic]"  # + Anthropic SDK for LLM summaries
@@ -152,25 +162,26 @@ runs. Ctrl+C stops everything.
 
 ### Running from source (`CMS.bat`)
 
-On machines where an unsigned exe is unwelcome (AV quarantine), `CMS.bat` is
-the equivalent launcher: it runs `python -m cms.cli` from the repo's `.venv`
-(falling back to the `python` on PATH), passes arguments through, and returns
-the real exit code. Double-click for the app, or `CMS.bat query "..."` etc.
+`Setup-Atlas.bat` creates a healthy project-local `.venv-atlas` environment and
+installs the declared dependencies. `CMS.bat` honors `CMS_PYTHON` when set,
+then probes the local runtime and other available runtimes. It finds the checkout even when launched from another
+folder, passes command arguments through and returns the real exit code.
+Double-clicking opens this project. Use `CMS.bat app --root "C:\path\to\project"`
+to work on another project, or `CMS.bat ui --root .` to view existing memory
+without starting the automatic processing/watch loop.
+
+If startup fails, the launcher explains how to run setup and keeps a
+double-clicked error window visible. A copied environment whose Python path no
+longer exists is not treated as a working runtime.
 
 ### Packaging as CMS.exe
 
 ```bash
 pip install pyinstaller
-python -m PyInstaller --onefile --name CMS --console --clean --noconfirm ^
-    --add-data "cms/ui_assets/index.html;cms/ui_assets" --hidden-import anthropic ^
-    --exclude-module torch --exclude-module torchvision --exclude-module torchaudio ^
-    --exclude-module numpy --exclude-module scipy --exclude-module pandas ^
-    --exclude-module matplotlib --exclude-module cv2 --exclude-module PIL ^
-    --exclude-module lxml --exclude-module IPython --exclude-module jupyter ^
-    --exclude-module pytest --exclude-module coverage --exclude-module rich ^
-    --exclude-module pygments --exclude-module tkinter --exclude-module setuptools ^
-    cms_exe.py
+python -m PyInstaller --clean --noconfirm CMS.spec
 ```
+
+The spec includes all viewer pages, scripts, styles, and built-in Library version snapshots. Distribute the complete `dist/CMS` folder.
 
 The excludes matter: networkx probes for optional backends (numpy/scipy/pandas/
 matplotlib) at import time, so PyInstaller happily bundles whatever heavy
@@ -202,10 +213,15 @@ nearest project holding `.memory/graph.json`, so one global entry serves every
 repo. In an un-mapped repo it stays alive and tools answer "no memory layer:
 run `cms run-all`".
 
-37 tools (this list is contract-checked against `cms/mcp.py` by Sentinel):
+38 tools (this list is contract-checked against `cms/mcp.py` by Sentinel):
 
 - **Grounding / read**: `query_codebase`, `get_file_summary`, `get_source`,
   `get_feature_trace`, `list_features`, `who_calls`, `who_imports`, `get_impact`.
+- **Context transparency**: `get_context_decision` reads the receipt behind a
+  query or task brief: local candidates, proposed ranking, delivered context,
+  source freshness and fallback. Optional Jev ranking is off by default.
+  See the [Jev integration design and adoption plan](docs/JEV_INTEGRATION.md)
+  for setup, evaluation, responsibility boundaries and the staged roadmap.
 - **Discuss**: `ask_codebase`, plain-language Q&A over the whole memory
   (flows, features, connections, intent-vs-reality), evidence named. Also in
   the UI as the Ask Atlas chat popup and on the CLI as `cms ask "..."`.
@@ -274,6 +290,12 @@ together without any import relationship (CO_CHANGES edges). In the UI, hit
 as dashed amber links, and the inspector gains a History section.
 
 ## Verification loop
+
+Atlas's current evidence is test execution, source/graph provenance and runtime
+checks. It does not currently generate or check Lean proofs. See
+[Lean verification direction](docs/LEAN_VERIFICATION_DIRECTION.md) for the
+proposed selective approach and the distinction between proving a model and
+verifying the production implementation.
 
 `cms verify` runs your tests under coverage with per-test contexts and maps each
 feature to the tests that actually execute its code (`exercised_by`, named

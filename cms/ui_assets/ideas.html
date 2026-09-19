@@ -2,6 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<script>
+// Local HTML files cannot contact the project server. Do not start the app here.
+if (location.protocol === 'file:') location.replace('open-atlas.html');
+</script>
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Atlas — Idea Journal</title>
 <style>
@@ -33,7 +37,7 @@ button:focus-visible,a:focus-visible{outline:2px solid var(--cyan);outline-offse
     <section><div class="eyebrow">Model inbox</div><h2>Nothing becomes yours silently</h2><p>Accept, merge, park, or reject every suggestion.</p><div id="detailCandidates" class="candidate-list"></div></section>
   </aside>
 </div><div class="toast" id="toast"></div>
-<script>
+<script type="text/atlas-app" id="atlas-page-source">
 const state={ideas:[],candidates:[],nodes:[],edges:[],selected:null,filter:'all',drawing:false,path:[],points:[],positions:new Map(),zoom:1,panX:0,panY:0,focus:false,panning:null};
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
 async function api(path,options){const r=await fetch(path,options);const data=await r.json();if(!r.ok||data.error)throw new Error(data.error||`Request failed (${r.status})`);return data}
@@ -128,6 +132,14 @@ $('#map').addEventListener('pointermove',e=>{if(state.drawing||state.panning)ret
 $('#map').addEventListener('pointerleave',()=>$('#mapTip').style.display='none');
 $$('[data-tab]').forEach(b=>b.onclick=()=>{$$('[data-tab]').forEach(x=>x.classList.toggle('on',x===b));$('#ideaList').hidden=b.dataset.tab!=='ideas';$('#candidateList').hidden=b.dataset.tab!=='candidates'});$$('[data-filter]').forEach(b=>b.onclick=()=>{$$('[data-filter]').forEach(x=>x.classList.toggle('on',x===b));state.filter=b.dataset.filter;layout();draw()});addEventListener('resize',()=>{layout();draw()});
 load().catch(e=>toast(e.message,true));
+</script>
+<script>
+(() => {
+  if (location.protocol === 'file:') return;
+  const app = document.createElement('script');
+  app.textContent = document.getElementById('atlas-page-source').textContent;
+  document.body.append(app);
+})();
 </script>
 </body>
 </html>

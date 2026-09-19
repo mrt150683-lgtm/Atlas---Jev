@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Open Atlas</title>
+<style>
+  * { box-sizing:border-box; }
+  body { margin:0; background:#0d0d0d; color:#c3c2b7; font:16px/1.6 system-ui,-apple-system,"Segoe UI",sans-serif; }
+  main { max-width:720px; margin:10vh auto; padding:32px; }
+  .brand { color:#80b7f7; letter-spacing:.22em; font-size:13px; font-weight:650; }
+  h1 { color:#f3f3ed; font-size:32px; line-height:1.2; margin:26px 0 18px; }
+  li { margin:12px 0; }
+  strong { color:#f3f3ed; }
+  a { color:#80b7f7; }
+  .button { display:inline-block; margin-top:12px; padding:10px 16px; border:1px solid #3987e5; border-radius:8px; text-decoration:none; }
+  :focus-visible { outline:2px solid #80b7f7; outline-offset:4px; }
+  .detail { padding-top:20px; border-top:1px solid #30302e; margin-top:30px; font-size:14px; }
+</style>
+</head>
+<body>
+<main>
+  <div class="brand">ATLAS</div>
+  <h1>Start Atlas to open your project</h1>
+  <p>This file contains the interface. Atlas needs its local server to read your project and display its map.</p>
+  <ol>
+    <li>Go back to the Atlas project folder and double-click <strong>CMS.bat</strong>. For a packaged copy, open <strong>CMS.exe</strong>.</li>
+    <li>Keep the Atlas window open. It opens the working interface in your browser when ready.</li>
+    <li>If the source launcher reports a missing runtime, double-click <strong>Setup-Atlas.bat</strong>, then try <strong>CMS.bat</strong> again. Setup requires Python 3.11 or newer and internet access.</li>
+  </ol>
+  <p>Already started Atlas on its usual port?</p>
+  <a class="button" href="http://127.0.0.1:7717/">Open the local Atlas app</a>
+  <p class="detail">If you chose another port, use the address printed in the Atlas window. Check the project name after opening. This page does not start a server or connect automatically.</p>
+</main>
+</body>
+</html>

@@ -2,6 +2,10 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<script>
+// Local HTML files cannot contact the project server. Do not start the app here.
+if (location.protocol === 'file:') location.replace('open-atlas.html');
+</script>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Atlas — Codebase Map</title>
 <style>
@@ -918,6 +922,7 @@
 .ann-btn:hover{border-color:var(--accent);color:var(--accent)}
 .ann-btn.primary{border-color:var(--accent);color:var(--accent)}
 </style>
+
 </head>
 <body>
 <div id="app">
@@ -940,6 +945,7 @@
       <button id="navBtn" title="Other screens">☰ Screens</button>
       <div id="navPop">
         <a id="libraryLink" href="/library">Library<span class="nk">Reusable skills, strategies &amp; constraints for agent context</span></a>
+        <a id="contextLink" href="/context">Context decisions<span class="nk">See what agents receive, why it was selected and where uncertainty remains</span></a>
         <a id="ideasLink" href="/ideas">Idea Journal<span class="nk">Ideas, sub-ideas, project connections &amp; model candidates</span></a>
         <a id="discoveryLink" href="/discovery">Discovery<span class="nk">Constellation &amp; Scout — cross-project fusion, idea engine</span></a>
         <a id="setupLink" href="/setup">Setup<span class="nk">Scope &amp; share — what's processed, export a bundle</span></a>
@@ -1101,7 +1107,7 @@
   </div>
 </div>
 
-<script>
+<script type="text/atlas-app" id="atlas-page-source">
 "use strict";
 /* Palette: validated dark categorical slots (dataviz reference palette). */
 const SLOTS = ["#3987e5","#199e70","#c98500","#008300","#9085e9","#e66767","#d55181","#d95926"];
@@ -1147,7 +1153,7 @@ function showFatal(msg) {
 }
 
 /* ── Ask Atlas: grounded chat over the memory layer ─────────── */
-function chatMsg(cls, text, feats) {
+function chatMsg(cls, text, feats, selection) {
   const el = document.createElement("div");
   el.className = "cmsg " + cls;
   // real answers go through the comprehension lens; greetings/errors don't
@@ -1162,6 +1168,17 @@ function chatMsg(cls, text, feats) {
     f.className = "feats";
     f.textContent = "grounded in: " + feats.join(" · ");
     el.appendChild(f);
+  }
+  if (selection && /^[a-f0-9]{32}$/.test(selection.id || "")) {
+    const detail = document.createElement("div");
+    detail.className = "feats";
+    const link = document.createElement("a");
+    link.href = `/context?receipt=${encodeURIComponent(selection.id)}`;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = "Inspect the context behind this answer";
+    detail.appendChild(link);
+    el.appendChild(detail);
   }
   $("chatMsgs").appendChild(el);
   $("chatMsgs").scrollTop = $("chatMsgs").scrollHeight;
@@ -1205,7 +1222,7 @@ async function loadHistory() {
     $("chatMsgs").innerHTML = "";
     for (const t of (d && d.transcript) || []) {
       chatMsg("me", t.q);
-      chatMsg("atlas", t.a, t.matched_features);
+      chatMsg("atlas", t.a, t.matched_features, t.context_selection);
     }
     document.querySelectorAll("#chatHistory .hs-row").forEach(r =>
       r.classList.toggle("on", r.dataset.sid === sid));
@@ -1245,7 +1262,7 @@ async function sendChat() {
       body: JSON.stringify({ question: q, session: chat.session }) }).then(r => r.json());
     thinking.remove();
     if (r.error) chatMsg("atlas err", r.error);
-    else chatMsg("atlas", r.answer, r.matched_features);
+    else chatMsg("atlas", r.answer, r.matched_features, r.context_selection);
   } catch (e) {
     thinking.remove();
     chatMsg("atlas err", "request failed: " + e);
@@ -1346,8 +1363,8 @@ async function flushLens() {
         body: JSON.stringify({ level, items: batch.map(([k, q]) => ({ id: k, text: q.text })) }),
       }).then(r => r.json());
       if (r.error) throw new Error(r.error);
-      $("lensNote").textContent = r.real ? "" :
-        "No AI provider configured — TL;DR and ADHD use built-in shortening; the other levels need an API key (cms config set anthropic_api_key …).";
+      $("lensNote").textContent = r.real ? "AI presentation may omit detail. Keep the original available when making decisions." :
+        "No AI provider configured — original wording is preserved, including warnings and limitations.";
       for (const [k, q] of batch) {
         const text = (r.results || {})[k] ?? q.text;
         Lens.cache.set(level + " " + k, text);
@@ -1654,24 +1671,85 @@ function buildFeatureView() {
   const keep = new Map();
   const ordered = [...S.features].sort((a, b) =>
     (a.source === b.source ? a.name.localeCompare(b.name) : a.source === "declared" ? -1 : 1));
-  const ringSize = Math.max(24, Math.ceil(Math.sqrt(ordered.length) * 4));
+  const grouped = S.human.on && S.human.res === 2;
+  const groups = new Map();
+  if (grouped) {
+    for (const f of ordered) {
+      const cid = S.hier.featComp.get(f.id) || "component:Unmapped";
+      if (!groups.has(cid)) groups.set(cid, []);
+      groups.get(cid).push(f);
+    }
+  }
+  const groupIds = [...groups.keys()].sort();
+  const groupCols = Math.max(1, Math.ceil(Math.sqrt(groupIds.length)));
+  const groupRows = Math.max(1, Math.ceil(groupIds.length / groupCols));
+  const groupMetrics = new Map(groupIds.map(cid => {
+    const count = groups.get(cid).length;
+    const cols = Math.max(1, Math.ceil(Math.sqrt(count)));
+    const rows = Math.max(1, Math.ceil(count / cols));
+    return [cid, { cols, rows, width: (cols - 1) * 155 + 210, height: (rows - 1) * 94 + 170 }];
+  }));
+  const colWidths = Array.from({ length: groupCols }, () => 0);
+  const rowHeights = Array.from({ length: groupRows }, () => 0);
+  groupIds.forEach((cid, i) => {
+    const m = groupMetrics.get(cid), col = i % groupCols, row = Math.floor(i / groupCols);
+    colWidths[col] = Math.max(colWidths[col], m.width);
+    rowHeights[row] = Math.max(rowHeights[row], m.height);
+  });
+  const groupGap = 110;
+  const boardWidth = colWidths.reduce((a, b) => a + b, 0) + groupGap * Math.max(0, groupCols - 1);
+  const boardHeight = rowHeights.reduce((a, b) => a + b, 0) + groupGap * Math.max(0, groupRows - 1);
+  const groupCenters = new Map();
+  groupIds.forEach((cid, i) => {
+    const col = i % groupCols, row = Math.floor(i / groupCols);
+    const xBefore = colWidths.slice(0, col).reduce((a, b) => a + b, 0) + col * groupGap;
+    const yBefore = rowHeights.slice(0, row).reduce((a, b) => a + b, 0) + row * groupGap;
+    groupCenters.set(cid, {
+      x: -boardWidth / 2 + xBefore + colWidths[col] / 2,
+      y: -boardHeight / 2 + yBefore + rowHeights[row] / 2,
+    });
+  });
   ordered.forEach((f, i) => {
-    const ring = Math.floor(i / ringSize);
-    const ringStart = ring * ringSize;
-    const ringCount = Math.min(ringSize, ordered.length - ringStart);
-    const angle = ((i - ringStart) / ringCount) * Math.PI * 2 - Math.PI / 2;
-    const radius = 135 + ring * 125;
+    let x, y;
+    if (grouped) {
+      const cid = S.hier.featComp.get(f.id) || "component:Unmapped";
+      const siblings = groups.get(cid), ci = siblings.indexOf(f);
+      const { cols, rows } = groupMetrics.get(cid);
+      const center = groupCenters.get(cid);
+      x = center.x + (ci % cols - (cols - 1) / 2) * 155;
+      y = center.y + (Math.floor(ci / cols) - (rows - 1) / 2) * 94;
+    } else {
+      const ringSize = Math.max(24, Math.ceil(Math.sqrt(ordered.length) * 4));
+      const ring = Math.floor(i / ringSize);
+      const ringStart = ring * ringSize;
+      const ringCount = Math.min(ringSize, ordered.length - ringStart);
+      const angle = ((i - ringStart) / ringCount) * Math.PI * 2 - Math.PI / 2;
+      const radius = 135 + ring * 125;
+      x = Math.cos(angle) * radius;
+      y = Math.sin(angle) * radius;
+    }
     keep.set(f.id, {
-      id: f.id, attrs: f, ext: false, feature: true,
+      id: f.id, attrs: f, ext: false, feature: true, shape: grouped ? "feature" : null,
       label: f.name,
+      meta: grouped ? `${(f.members || []).length} member${(f.members || []).length === 1 ? "" : "s"}` : null,
       color: f.source === "discovered" ? "#199e70" : "#c98500",
       r: Math.max(8, Math.min(20, 6 + (f.members || []).length * 2.5)),
-      x: Math.cos(angle) * radius,
-      y: Math.sin(angle) * radius,
+      x, y,
       vx: 0, vy: 0,
     });
   });
-  for (const old of S.nodes) { const n = keep.get(old.id); if (n) { n.x = old.x; n.y = old.y; } }
+  if (grouped) {
+    for (const cid of groupIds) {
+      const a = S.byId.get(cid) || { id: cid, name: cid.replace(/^component:/, ""), type: "component" };
+      const center = groupCenters.get(cid);
+      keep.set("ui:feature-hull:" + cid, {
+        id: "ui:feature-hull:" + cid, attrs: a, hull: true, rectHull: true, uiHull: true,
+        childIds: groups.get(cid).map(f => f.id), label: a.name, color: "#9085e9",
+        r: 8, x: center.x, y: center.y, vx: 0, vy: 0,
+      });
+    }
+  }
+  if (!grouped) for (const old of S.nodes) { const n = keep.get(old.id); if (n) { n.x = old.x; n.y = old.y; } }
   S.nodes = [...keep.values()];
   const featureEdges = (S.graph.links || S.graph.edges || [])
     .filter(e => (e.type === "CONNECTS" || e.type === "RELATES") && keep.has(e.source) && keep.has(e.target))
@@ -1717,15 +1795,17 @@ function setFeatMode(on) {
 const RES_LEVELS = [
   { name: "System",    blurb: "Primary systems and their responsibilities — the whole codebase in a handful of shapes." },
   { name: "Component", blurb: "Major components inside each system and how they relate." },
-  { name: "Feature",   blurb: "Recognised features, their connections, and who owns them." },
-  { name: "Module",    blurb: "Files and modules with their import structure — implementation detail thinned out." },
-  { name: "Function",  blurb: "Functions and classes of the current focus spilled onto the map, call threads visible." },
-  { name: "Source",    blurb: "Raw implementation — selecting an item opens the annotated source viewer." },
+  { name: "Feature",   blurb: "Capabilities grouped by owning component, with declared and inferred relationships." },
+  { name: "Module",    blurb: "A stable architecture board: modules grouped by directory lane, imports visible across boundaries." },
+  { name: "Function",  blurb: "A focused implementation board: files become lanes and calls connect their functions and classes." },
+  { name: "Source",    blurb: "One file in source order, with exact line spans and the annotated reader one click away." },
 ];
 const NODE_LEVEL = { system: 0, component: 1, feature: 2, file: 3, external: 3, func: 4, class: 4 };
 
-/* flat = deterministic layouts with feature-style edge rendering */
+/* flat = feature-style edge rendering; fixed = authored layouts that must not
+   be pulled apart by the force simulation. */
 const flatView = () => S.featMode || (S.human.on && S.human.res <= 2);
+const fixedView = () => S.human.on || S.featMode;
 
 function humanParent(id) {
   if (!id) return null;
@@ -1860,17 +1940,141 @@ function selectedMemberFiles() {
   return out;
 }
 
+function buildModuleView() {
+  /* Architecture board: modules are grouped into stable directory lanes rather
+     than dropped into the generic force cloud. */
+  const files = S.graph.nodes.filter(n => n.type === "file")
+    .sort((a, b) => a.path.localeCompare(b.path));
+  const byDir = new Map();
+  for (const f of files) {
+    const dir = topDir(f.path);
+    if (!byDir.has(dir)) byDir.set(dir, []);
+    byDir.get(dir).push(f);
+  }
+  const dirs = [...byDir.keys()].sort();
+  dirs.forEach((d, i) => S.dirSlot.set(d, i));
+  const laneCols = Math.max(1, Math.ceil(Math.sqrt(dirs.length)));
+  const laneRows = Math.max(1, Math.ceil(dirs.length / laneCols));
+  const laneMetrics = new Map(dirs.map(dir => {
+    const count = byDir.get(dir).length;
+    const cols = Math.max(2, Math.ceil(Math.sqrt(count)));
+    const rows = Math.max(1, Math.ceil(count / cols));
+    return [dir, { cols, rows, width: (cols - 1) * 128 + 190, height: (rows - 1) * 82 + 160 }];
+  }));
+  const laneWidths = Array.from({ length: laneCols }, () => 0);
+  const laneHeights = Array.from({ length: laneRows }, () => 0);
+  dirs.forEach((dir, i) => {
+    const m = laneMetrics.get(dir), col = i % laneCols, row = Math.floor(i / laneCols);
+    laneWidths[col] = Math.max(laneWidths[col], m.width);
+    laneHeights[row] = Math.max(laneHeights[row], m.height);
+  });
+  const laneGap = 130;
+  const boardWidth = laneWidths.reduce((a, b) => a + b, 0) + laneGap * Math.max(0, laneCols - 1);
+  const boardHeight = laneHeights.reduce((a, b) => a + b, 0) + laneGap * Math.max(0, laneRows - 1);
+  const keep = new Map();
+  dirs.forEach((dir, di) => {
+    const list = byDir.get(dir), { cols, rows } = laneMetrics.get(dir);
+    const col = di % laneCols, row = Math.floor(di / laneCols);
+    const xBefore = laneWidths.slice(0, col).reduce((a, b) => a + b, 0) + col * laneGap;
+    const yBefore = laneHeights.slice(0, row).reduce((a, b) => a + b, 0) + row * laneGap;
+    const gx = -boardWidth / 2 + xBefore + laneWidths[col] / 2;
+    const gy = -boardHeight / 2 + yBefore + laneHeights[row] / 2;
+    list.forEach((f, i) => {
+      keep.set(f.id, {
+        id: f.id, attrs: f, ext: false, module: true, shape: "module",
+        parentId: "ui:module-hull:" + dir, label: f.path.split("/").pop(),
+        color: slotColor(dir), r: 13,
+        x: gx + (i % cols - (cols - 1) / 2) * 128,
+        y: gy + (Math.floor(i / cols) - (rows - 1) / 2) * 82,
+        vx: 0, vy: 0,
+      });
+    });
+    keep.set("ui:module-hull:" + dir, {
+      id: "ui:module-hull:" + dir, attrs: { type: "directory", path: dir },
+      hull: true, rectHull: true, uiHull: true, childIds: list.map(f => f.id),
+      label: dir, color: slotColor(dir), r: 8, x: gx, y: gy, vx: 0, vy: 0,
+    });
+  });
+  const links = S.graph.links || S.graph.edges || [];
+  S.nodes = [...keep.values()];
+  S.edges = links.filter(e => e.type === "IMPORTS" && keep.has(e.source) && keep.has(e.target))
+    .map(e => ({ s: keep.get(e.source), t: keep.get(e.target), architecture: true }));
+  S.cochanges = [];
+  S.alpha = 1;
+}
+
+function functionFocusFiles(sourceMode) {
+  const selectedChain = S.selected ? trailChain(S.selected) : [];
+  const selectedFile = selectedChain.find(id => id.startsWith("file:"));
+  if (sourceMode && selectedFile) return new Set([selectedFile]);
+  const focus = selectedMemberFiles();
+  if (focus.size) return sourceMode ? new Set([[...focus].sort()[0]]) : focus;
+  const firstFeature = S.features[0];
+  if (firstFeature) {
+    const fallback = memberFileIds(firstFeature);
+    if (fallback.size) return sourceMode ? new Set([[...fallback].sort()[0]]) : fallback;
+  }
+  const firstFile = S.graph.nodes.find(n => n.type === "file");
+  return firstFile ? new Set([firstFile.id]) : new Set();
+}
+
+function buildFunctionView(sourceMode = false) {
+  /* Focus board: every file is a lane and its functions are ordered by source
+     position. At Source resolution the board narrows to one file. */
+  const focusIds = [...functionFocusFiles(sourceMode)].filter(id => S.byId.has(id)).sort();
+  const laneCols = sourceMode ? 1 : Math.max(1, Math.ceil(Math.sqrt(focusIds.length)));
+  const laneRows = Math.max(1, Math.ceil(focusIds.length / laneCols));
+  const keep = new Map();
+  focusIds.forEach((fid, fi) => {
+    const file = S.byId.get(fid), comps = (S.comps.get(file.path) || [])
+      .slice().sort((a, b) => (a.start_line || 0) - (b.start_line || 0));
+    const gx = (fi % laneCols - (laneCols - 1) / 2) * (sourceMode ? 0 : 330);
+    const gy = (Math.floor(fi / laneCols) - (laneRows - 1) / 2) * 340;
+    const compCols = sourceMode ? 1 : Math.max(1, Math.min(3, Math.ceil(Math.sqrt(comps.length))));
+    const compRows = Math.max(1, Math.ceil(comps.length / compCols));
+    comps.forEach((c, ci) => {
+      keep.set(c.id, {
+        id: c.id, attrs: c, ext: false, comp: true, functionNode: true,
+        shape: sourceMode ? "source" : (c.type === "class" ? "class" : "function"),
+        parentId: fid, label: c.qualname || c.name,
+        meta: `${c.start_line || "?"}–${c.end_line || "?"}`,
+        color: c.type === "class" ? "#9085e9" : "#199e70", r: sourceMode ? 15 : 10,
+        x: gx + (ci % compCols - (compCols - 1) / 2) * (sourceMode ? 0 : 92),
+        y: gy + (Math.floor(ci / compCols) - (compRows - 1) / 2) * (sourceMode ? 54 : 68),
+        vx: 0, vy: 0,
+      });
+    });
+    keep.set(fid, {
+      id: fid, attrs: file, hull: true, rectHull: true, fileLane: true,
+      childIds: comps.map(c => c.id), label: file.path, color: slotColor(topDir(file.path)),
+      r: 8, x: gx, y: gy, vx: 0, vy: 0,
+    });
+    if (!comps.length) {
+      const lane = keep.get(fid);
+      lane.hull = false; lane.module = true; lane.shape = "module"; lane.r = 16;
+    }
+  });
+  const links = S.graph.links || S.graph.edges || [];
+  S.nodes = [...keep.values()];
+  S.edges = links.filter(e => e.type === "CALLS" && keep.has(e.source) && keep.has(e.target))
+    .map(e => ({ s: keep.get(e.source), t: keep.get(e.target), call: true, flow: true }));
+  S.cochanges = [];
+  S.alpha = 1;
+}
+
 function buildHumanView() {
   const res = S.human.res;
   const noHier = !S.hier.systems.length;
   $("resNote").textContent =
     noHier && res <= 1 ? "No hierarchy mapped yet — run `cms update` (features shown instead)."
-    : res >= 4 ? "Select a feature or file to spill its implementation open. Source level opens the viewer."
+    : res === 4 ? "Select a feature or module to isolate its implementation lanes and call flow."
+    : res === 5 ? "One file, ordered by source position. Select a function for its context; View file opens the annotated reader."
     : "";
   if (res <= 1 && !noHier) buildPyramidView(res);
   else if (res <= 2 || noHier) buildFeatureView();
-  else if (res === 3) buildGraphView(new Set());       // modules only, nothing spilled
-  else buildGraphView(selectedMemberFiles());           // 4/5: focus spilled open
+  else if (res === 3) buildModuleView();
+  else if (res === 4) buildFunctionView(false);
+  else buildFunctionView(true);
 }
 
 function rebuildView() {
@@ -1925,13 +2129,6 @@ function setResolution(res, focusId) {
   fit();
   if (target && S.byId.has(target)) {
     selectAny(target);
-    if (S.human.res === 5) {                        // Source: open the raw code
-      const a = S.byId.get(target);
-      const chain = trailChain(target);
-      const fileId = a.type === "file" ? target : chain.find(c => c.startsWith("file:"));
-      const fa = fileId && S.byId.get(fileId);
-      if (fa && fa.path) openViewer(fa.path, fa.language || "");
-    }
   } else { renderInspectorPlaceholder(); updateTrail(); }
 }
 
@@ -2099,6 +2296,28 @@ function _renderLegendBody() {
        <div class="note">node size = member count · click for the full feature trace<br>overview shows every declared connection and a stable inferred sample; focus reveals all incident evidence</div>`);
     return;
   }
+  if (S.human.on && S.human.res === 3) {
+    el.insertAdjacentHTML("beforeend",
+      `<div class="li"><span class="sw" style="background:#3987e522;border:1px solid #3987e5;border-radius:3px"></span>module</div>
+       <div class="li"><span class="sw" style="background:transparent;border-top:1px solid rgba(255,255,255,.22);height:0;border-radius:0"></span>imports</div>
+       <div class="note">stable directory lanes · module cards are sized equally so architecture, not file length, leads the view<br>click a module to inspect it · double-click to move into its functions</div>`);
+    return;
+  }
+  if (S.human.on && S.human.res === 4) {
+    el.insertAdjacentHTML("beforeend",
+      `<div class="li"><span class="sw" style="background:#199e7022;border:1px solid #199e70;border-radius:5px"></span>function</div>
+       <div class="li"><span class="sw" style="background:#9085e922;border:1px dashed #9085e9;border-radius:5px"></span>class</div>
+       <div class="li"><span class="sw" style="background:transparent;border-top:1px solid rgba(25,158,112,.7);height:0;border-radius:0"></span>call</div>
+       <div class="note">only the current feature or module is expanded · each dashed lane is one file<br>choose another feature in the explorer to replace the focus</div>`);
+    return;
+  }
+  if (S.human.on && S.human.res === 5) {
+    el.insertAdjacentHTML("beforeend",
+      `<div class="li"><span class="sw" style="background:#199e7022;border:1px solid #199e70;border-radius:4px"></span>source range</div>
+       <div class="li"><span style="font:10px var(--mono);color:var(--accent)">24–61</span> exact lines</div>
+       <div class="note">one file, top-to-bottom in source order · select a range for its context<br>use View file in the inspector for the full annotated reader</div>`);
+    return;
+  }
   if (S.heat) {
     const grad = `linear-gradient(to right, ${HEAT.join(",")})`;
     el.insertAdjacentHTML("beforeend",
@@ -2122,7 +2341,7 @@ function _renderLegendBody() {
 /* ── force simulation ─────────────────────────────────────── */
 function physics() {
   const N = S.nodes;
-  if (flatView()) return;  // deterministic layouts (feature map, human res 0-2) never simulate
+  if (fixedView()) return;  // authored Human View layouts never simulate
   for (let i = 0; i < N.length; i++) {
     for (let j = i + 1; j < N.length; j++) {
       const a = N[i], b = N[j];
@@ -2185,6 +2404,22 @@ function neighborhood(id) {
   return set;
 }
 
+function roundRectPath(x, y, w, h, r) {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.lineTo(x + w - rr, y); ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+  ctx.lineTo(x + w, y + h - rr); ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+  ctx.lineTo(x + rr, y + h); ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+  ctx.lineTo(x, y + rr); ctx.quadraticCurveTo(x, y, x + rr, y);
+  ctx.closePath();
+}
+
+function shortLabel(text, max) {
+  const s = String(text || "");
+  return s.length > max ? s.slice(0, Math.max(1, max - 1)) + "…" : s;
+}
+
 function draw() {
   ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
   ctx.clearRect(0, 0, W, H);
@@ -2194,10 +2429,30 @@ function draw() {
   // hulls first: dashed halo around each destructured file's components
   for (const n of S.nodes) {
     if (!n.hull) continue;
-    const comps = S.nodes.filter(c => (c.comp || c.human) && c.parentId === n.id);
+    const childIds = new Set(n.childIds || []);
+    const comps = S.nodes.filter(c => childIds.has(c.id) || ((c.comp || c.human || c.module) && c.parentId === n.id));
     let hr = 34;
     for (const c of comps) hr = Math.max(hr, Math.hypot(c.x - n.x, c.y - n.y) + c.r + 14);
     const [hx, hy] = toScreen(n.x, n.y);
+    if (n.rectHull && comps.length) {
+      const xs = comps.map(c => toScreen(c.x, c.y)[0]);
+      const ys = comps.map(c => toScreen(c.x, c.y)[1]);
+      const padX = (n.fileLane ? 68 : 42) * S.view.k;
+      const padY = (n.fileLane ? 42 : 38) * S.view.k;
+      const x0 = Math.min(...xs) - padX, x1 = Math.max(...xs) + padX;
+      const y0 = Math.min(...ys) - padY, y1 = Math.max(...ys) + padY;
+      ctx.fillStyle = n.color + "0c";
+      ctx.strokeStyle = n.color + "66";
+      ctx.lineWidth = 1.1; ctx.setLineDash([7, 5]);
+      roundRectPath(x0, y0, x1 - x0, y1 - y0, 13); ctx.fill(); ctx.stroke();
+      ctx.setLineDash([]);
+      if (S.view.k >= .34) {
+        ctx.font = `600 10.5px ${getComputedStyle(document.body).getPropertyValue("--font")}`;
+        ctx.fillStyle = n.color; ctx.textAlign = "left";
+        ctx.fillText(shortLabel(n.label, n.fileLane ? 46 : 28), x0 + 12, y0 + 18);
+      }
+      continue;
+    }
     ctx.setLineDash([6, 5]);
     ctx.strokeStyle = n.color + "55";
     ctx.lineWidth = 1.2;
@@ -2215,10 +2470,10 @@ function draw() {
     const [x1, y1] = toScreen(e.s.x, e.s.y), [x2, y2] = toScreen(e.t.x, e.t.y);
     const lit = hood && (e.s.id === focus || e.t.id === focus);
     if (flatView()) {
-      const hovEdge = e === S.hoverEdge;
+      const hovEdge = e === S.hoverEdge || (typeof CX !== "undefined" && e === CX.selectedEdge);
       ctx.setLineDash(e.derived ? [4, 4] : []);
-      ctx.strokeStyle = (lit || hovEdge) ? "rgba(201,133,0,0.9)"
-        : e.derived ? "rgba(255,255,255,0.28)" : "rgba(201,133,0,0.55)";
+      ctx.strokeStyle = (lit || hovEdge) ? "rgba(115,185,255,0.95)"
+        : e.derived ? "rgba(120,170,195,0.08)" : "rgba(115,185,255,0.16)";
       ctx.lineWidth = (lit || hovEdge) ? 1.8 : (e.derived ? 1 : 1.4);
     } else if (e.call) {  // sub-level call edges: fine aqua threads
       ctx.strokeStyle = lit ? "rgba(25,158,112,0.85)" : "rgba(25,158,112,0.30)";
@@ -2229,10 +2484,11 @@ function draw() {
     }
     ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
     ctx.setLineDash([]);
-    if (flatView()) {  // arrowheads always visible in the feature map
+    if (flatView() && (lit || e === S.hoverEdge || (typeof CX !== "undefined" && CX.center))) {  // direction is legible in the focused view
       const ang = Math.atan2(y2 - y1, x2 - x1);
-      const bx = x2 - Math.cos(ang) * (e.t.r * S.view.k + 5);
-      const by = y2 - Math.sin(ang) * (e.t.r * S.view.k + 5);
+      const boundary = e.t.shape === "feature" ? Math.min(82 / Math.max(.001,Math.abs(Math.cos(ang))),23 / Math.max(.001,Math.abs(Math.sin(ang)))) : e.t.r;
+      const bx = x2 - Math.cos(ang) * (boundary * S.view.k + 5);
+      const by = y2 - Math.sin(ang) * (boundary * S.view.k + 5);
       ctx.fillStyle = (lit || e === S.hoverEdge) ? "rgba(201,133,0,0.95)"
         : e.derived ? "rgba(255,255,255,0.30)" : "rgba(201,133,0,0.6)";
       ctx.beginPath();
@@ -2273,6 +2529,34 @@ function draw() {
     const dim = hood ? !hood.has(n.id) : (S.featureFiles ? !inFeature : false);
     ctx.globalAlpha = dim ? 0.22 : 1;
     ctx.fillStyle = S.heat ? (n.heatColor || "#383835") : n.color;
+    if (n.shape === "feature" || n.shape === "module" || n.shape === "function" || n.shape === "class" || n.shape === "source") {
+      const wide = n.shape === "source" ? 178 : n.shape === "feature" ? 164 : n.shape === "module" ? 104 : 76;
+      const high = n.shape === "source" ? 38 : n.shape === "feature" ? 46 : n.shape === "module" ? 38 : 28;
+      const ww = wide * S.view.k, hh = high * S.view.k;
+      ctx.fillStyle = n.color + (n.shape === "source" ? "2c" : "18");
+      if(n.feature){ctx.fillStyle="#172637";}
+      roundRectPath(x - ww / 2, y - hh / 2, ww, hh, n.shape === "module" || n.shape === "feature" ? 8 : 12); ctx.fill();
+      ctx.strokeStyle = n.color + "cc"; ctx.lineWidth = n.id === S.selected ? 2 : 1.2; ctx.stroke();
+      if (n.shape === "class") {
+        ctx.setLineDash([3, 2]); ctx.strokeStyle = n.color;
+        roundRectPath(x - ww / 2 - 3, y - hh / 2 - 3, ww + 6, hh + 6, 14); ctx.stroke(); ctx.setLineDash([]);
+      }
+      if (S.view.k >= .48 || n.id === S.selected) {
+        const baseMax = n.shape === "source" ? 28 : n.shape === "feature" ? 24 : n.shape === "module" ? 16 : 14;
+        const labelMax = Math.max(5, Math.floor(baseMax * Math.min(1, S.view.k / .8)));
+        ctx.font = `600 ${n.shape === "source" ? 10.5 : n.feature ? 11 : 9.5}px ${getComputedStyle(document.body).getPropertyValue("--font")}`;
+        ctx.fillStyle = dim ? "#777" : "#e7e7df"; ctx.textAlign = "center";
+        let fitted = shortLabel(n.label, labelMax);
+        while(fitted.length > 2 && ctx.measureText(fitted).width > ww - 12) fitted = fitted.slice(0, -2) + "…";
+        ctx.fillText(fitted, x, y + (n.meta && S.view.k >= .7 ? -2 : 3));
+      }
+      if (n.meta && S.view.k >= .7) {
+        ctx.font = `9px ${getComputedStyle(document.body).getPropertyValue("--mono")}`;
+        ctx.fillStyle = n.color; ctx.fillText(n.meta, x, y + 12);
+      }
+      ctx.globalAlpha = 1;
+      continue;
+    }
     ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill();
     ctx.strokeStyle = "rgba(13,13,13,0.9)"; ctx.lineWidth = 2;  // 2px surface ring
     ctx.stroke();
@@ -2311,9 +2595,12 @@ function fit() {
   if (!S.nodes.length) return;
   let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
   for (const n of S.nodes) {
-    x0 = Math.min(x0, n.x); y0 = Math.min(y0, n.y);
-    x1 = Math.max(x1, n.x); y1 = Math.max(y1, n.y);
+    const ex = n.shape === "source" ? 94 : n.shape === "feature" ? 72 : n.shape === "module" ? 58 : n.shape ? 44 : n.r;
+    const ey = n.shape === "feature" ? 30 : n.shape === "module" ? 26 : n.shape ? 24 : n.r;
+    x0 = Math.min(x0, n.x - ex); y0 = Math.min(y0, n.y - ey);
+    x1 = Math.max(x1, n.x + ex); y1 = Math.max(y1, n.y + ey);
   }
+  if (typeof CX !== "undefined" && S.featMode && !S.human.on && $("connectionExplorer")) { cxFit(); return; }
   const pad = 90;
   const k = Math.min((W - pad*2) / Math.max(x1-x0, 60), (H - pad*2) / Math.max(y1-y0, 60), 2.2);
   S.view.k = k;
@@ -2345,7 +2632,9 @@ function nodeAt(mx, my) {
   for (const n of S.nodes) {
     if (n.hull) continue;  // hulls are background; their components are pickable
     const d = Math.hypot(n.x - wx, n.y - wy);
-    if (d < n.r + 6 / S.view.k && d < bd) { best = n; bd = d; }
+    const shaped = n.shape === "source" ? 92 : n.shape === "feature" ? 84 : n.shape === "module" ? 56 : n.shape ? 42 : n.r;
+    const hit = n.shape ? Math.abs(n.x-wx) < shaped + 4/S.view.k && Math.abs(n.y-wy) < (n.shape === "feature" ? 23 : n.shape === "source" || n.shape === "module" ? 19 : 14) + 4/S.view.k : d < shaped + 6 / S.view.k;
+    if (hit && d < bd) { best = n; bd = d; }
   }
   return best;
 }
@@ -2843,7 +3132,9 @@ function selectFeature(featureId) {
   const feat = S.byId.get(featureId);
   if (!feat) return;
   const flat = S.featMode || (S.human.on && S.human.res === 2);
-  S.selected = flat ? featureId : null;  // ring the node in feature-level views
+  S.selected = S.human.on ? featureId : (flat ? featureId : null);
+  // Human View keeps the canonical feature selection across every resolution;
+  // deeper authored layouts use it to decide which implementation to reveal.
   S.featureFiles = flat ? null : memberFileIds(feat);
   markTree(null);
   document.querySelectorAll(".feat-row.selected").forEach(r => r.classList.remove("selected"));
@@ -2940,8 +3231,9 @@ function renderFeatureInspector(feat) {
   html += fidelitySectionHtml();
   html += intentSectionHtml();
   html += `<div class="i-section"><h3>Test execution evidence (${exercisedBy.length})</h3>` +
+    `<div class="i-path">${esc(feat.verification_state?.reason || "No current test result recorded.")}${feat.coverage_current === false && exercisedBy.length ? " Mapping is historical; refresh coverage before relying on it." : ""}</div>` +
     `<div class="i-path" style="font-family:var(--font);font-size:11px;margin-bottom:9px">` +
-    `Coverage shows which tests executed this feature's member lines. Passing them does not prove every intended behaviour is specified or correct.` +
+    `Coverage shows which tests executed this feature's member lines. Passing them does not prove every intended behaviour is specified or correct. Link explicit criteria to assertions with <b>cms verify-plan</b> to record requirement checks.` +
     `</div>` +
     (exercisedBy.length
       ? `<div class="conn-list">${exercisedBy.map(t => `<div><span class="dir">test</span>${esc(t)}</div>`).join("")}</div>`
@@ -3717,6 +4009,7 @@ window.addEventListener("keydown", e => {
 async function runSearch(q) {
   const r = await fetch(`/api/query?q=${encodeURIComponent(q)}&k=8`);
   const data = await r.json();
+  if (input.value.trim() !== q) return;
   const hits = data.results || [];
   if (!hits.length) {
     resultsEl.innerHTML = `<div class="hit"><span class="loc">no matches</span></div>`;
@@ -3741,6 +4034,11 @@ async function runSearch(q) {
     resultsEl.classList.remove("open");
     window.open(`/api/prompt?task=${encodeURIComponent(q)}`, "_blank");
   };
+  const preview = document.createElement("a");
+  preview.className = "hit";
+  preview.href = `/context?q=${encodeURIComponent(q)}`;
+  preview.textContent = "Inspect context selection for this task →";
+  resultsEl.appendChild(preview);
   resultsEl.classList.add("open");
   resultsEl.querySelectorAll(".hit[data-id]").forEach(el => {
     el.onclick = () => {
@@ -4156,7 +4454,7 @@ function renderMarkdown(src) {
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
     .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (_, txt, href) =>
-      `<a href="${esc(href)}" target="_blank" rel="noopener">${txt}</a>`);
+      /^(https?:\/\/|mailto:|\/[^/]|#)/i.test(href) ? `<a href="${esc(href)}" target="_blank" rel="noopener noreferrer">${txt}</a>` : txt);
   while (i < lines.length) {
     const line = lines[i];
     if (/^```/.test(line)) {                                   // fenced code
@@ -4485,7 +4783,23 @@ function viewerDeepLink() {
 }
 
 loadNoteCounts();
-boot().then(viewerDeepLink);
+
+</script>
+<script>
+(() => {
+  if (location.protocol === 'file:') return;
+  const styles = document.createElement('link');
+  styles.rel = 'stylesheet'; styles.href = '/assets/connections.css';
+  document.head.append(styles);
+  const app = document.createElement('script');
+  app.textContent = document.getElementById('atlas-page-source').textContent;
+  document.body.append(app);
+  const connections = document.createElement('script');
+  connections.src = '/assets/connections.js';
+  connections.onload = () => boot().then(() => {viewerDeepLink(); initConnectionExplorer();});
+  connections.onerror = () => toast('Atlas could not load the map. Refresh this page or restart CMS.bat.');
+  document.body.append(connections);
+})();
 </script>
 </body>
 </html>

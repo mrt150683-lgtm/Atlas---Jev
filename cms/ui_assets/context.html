@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<script>
+// Local HTML files cannot contact the project server. Do not start the app here.
+if (location.protocol === 'file:') location.replace('open-atlas.html');
+</script>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Atlas · Context decisions</title>
+<style>
+  :root {
+    --bg:#0d0d0d; --surface:#141413; --raised:#1a1a19; --border:#30302e;
+    --ink:#f3f3ed; --text:#c3c2b7; --muted:#a09e95; --blue:#80b7f7;
+    --accent:#3987e5; --amber:#e3bb76; --green:#93d5b0; --red:#f2a0a0;
+    --mono:ui-monospace,"Cascadia Code","Consolas",monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif; -webkit-font-smoothing:antialiased; }
+  button,input,textarea,select { font:inherit; }
+  a { color:var(--blue); text-decoration:none; }
+  a:hover { text-decoration:underline; }
+  button,a,input,textarea,select,summary { -webkit-tap-highlight-color:transparent; }
+  :focus-visible { outline:2px solid var(--blue); outline-offset:4px; }
+  button { cursor:pointer; }
+  button:disabled { opacity:.55; cursor:wait; }
+  [hidden] { display:none !important; }
+  h1,h2,h3,p { margin:0; }
+  h1,h2,h3 { color:var(--ink); }
+  .shell { max-width:1440px; margin:auto; padding:0 36px; }
+  .topbar { border-bottom:1px solid var(--border); background:var(--surface); }
+  .topbar .shell { min-height:62px; display:flex; align-items:center; justify-content:space-between; gap:18px; }
+  .brand { display:flex; align-items:center; gap:11px; color:var(--ink); font-weight:650; font-size:13px; letter-spacing:.22em; }
+  .brand svg { width:25px; height:25px; }
+  .toplinks { display:flex; align-items:center; gap:22px; font-size:12px; }
+  .toplinks a { color:var(--text); }
+  .pill { display:inline-flex; align-items:center; gap:7px; width:fit-content; border:1px solid var(--border); border-radius:99px; padding:4px 10px; color:var(--text); font-size:11px; line-height:1.5; }
+  .pill.blue { color:var(--blue); background:#3987e510; border-color:#3987e544; }
+  .pill.amber { color:var(--amber); background:#e3bb7609; border-color:#e3bb763f; }
+  .pill.green { color:var(--green); background:#93d5b009; border-color:#93d5b03f; }
+  .dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
+  .hero { padding:38px 0 26px; display:flex; justify-content:space-between; align-items:flex-start; gap:32px; }
+  .eyebrow { color:var(--blue); font-size:10px; font-weight:650; text-transform:uppercase; letter-spacing:.16em; margin-bottom:9px; }
+  h1 { font-size:clamp(27px,3vw,34px); line-height:1.25; letter-spacing:-.025em; font-weight:620; }
+  .lede { color:var(--muted); max-width:710px; margin-top:10px; font-size:14px; }
+  .setup { width:280px; flex-shrink:0; font-size:12px; }
+  .setup summary { cursor:pointer; color:var(--text); padding:5px 0 10px; }
+  .setup .inside { margin-top:8px; padding:15px; background:var(--surface); border:1px solid var(--border); border-radius:8px; }
+  .setup p+p { margin-top:9px; }
+  .setup code { color:var(--blue); word-break:break-word; font-size:11px; }
+  .setup dl { margin:13px 0 0; }
+  .setup dt { color:var(--ink); margin-top:10px; font-weight:600; }
+  .setup dd { margin:1px 0 0; color:var(--muted); }
+  .pipeline { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); border:1px solid var(--border); border-radius:9px; background:var(--surface); margin-bottom:23px; }
+  .step { padding:16px 19px; display:flex; align-items:flex-start; gap:11px; }
+  .step+.step { border-left:1px solid var(--border); }
+  .step-number { color:var(--blue); font:11px/1.7 var(--mono); padding-top:1px; }
+  .step h2 { font-size:12px; font-weight:600; margin-bottom:4px; }
+  .step p { color:var(--muted); font-size:12px; }
+  .composer { padding:20px 22px; border:1px solid var(--border); background:var(--surface); border-radius:9px; }
+  .composer label { display:block; color:var(--ink); font-size:13px; font-weight:550; margin-bottom:9px; }
+  .inputrow { display:flex; gap:12px; align-items:stretch; }
+  textarea { flex:1; min-height:71px; resize:vertical; width:100%; color:var(--ink); background:var(--bg); border:1px solid #3c3c39; border-radius:6px; padding:11px 13px; line-height:1.6; }
+  textarea::placeholder { color:#929188; }
+  .submit-group { display:flex; flex-direction:column; gap:8px; min-width:166px; }
+  .btn { display:inline-flex; justify-content:center; align-items:center; gap:7px; border:1px solid #41413c; background:var(--raised); color:var(--text); border-radius:6px; padding:7px 12px; font-size:12px; line-height:1.5; text-decoration:none; }
+  .btn:hover:not(:disabled) { border-color:#72726a; color:var(--ink); }
+  .btn.primary { background:#307cd5; color:#fff; border-color:#4c94e9; min-height:39px; }
+  .btn.primary:hover:not(:disabled) { background:#3987e5; border-color:#8ab9f1; }
+  .limit { display:flex; justify-content:center; align-items:center; gap:7px; font-size:11px; color:var(--muted); }
+  .limit label { margin:0; font-size:11px; font-weight:400; color:var(--muted); }
+  select { color:var(--text); border:0; background:var(--surface); font-size:11px; padding:1px 5px; }
+  .composer-foot { display:flex; align-items:flex-start; justify-content:space-between; gap:18px; padding-top:10px; color:var(--muted); font-size:11px; }
+  .composer-foot .privacy { max-width:760px; }
+  .notice { padding:11px 14px; border:1px solid var(--border); border-radius:6px; margin-top:12px; font-size:12px; }
+  .notice.error { color:var(--red); background:#f2a0a009; border-color:#f2a0a03c; }
+  .notice.info { color:var(--blue); background:#3987e509; border-color:#3987e533; }
+  .workspace { display:grid; grid-template-columns:272px minmax(0,1fr); gap:28px; margin:32px 0 50px; align-items:start; }
+  .section-head { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:13px; }
+  .section-head h2 { font-size:13px; font-weight:600; }
+  .quiet-btn { border:0; background:none; color:var(--muted); padding:3px; font-size:11px; }
+  .quiet-btn:hover { color:var(--ink); }
+  .history-list { display:flex; flex-direction:column; gap:7px; }
+  .history-item { text-align:left; width:100%; border:1px solid var(--border); border-radius:7px; padding:12px; background:var(--surface); color:var(--text); }
+  .history-item:hover { border-color:#55554f; }
+  .history-item[aria-current="true"] { border-color:#3987e57a; background:#3987e510; box-shadow:inset 3px 0 0 var(--accent); }
+  .history-query { display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; font-size:12px; color:var(--ink); overflow-wrap:anywhere; }
+  .history-meta { display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:9px; color:var(--muted); font-size:10px; }
+  .history-state { color:var(--blue); }
+  .history-state.fallback { color:var(--amber); }
+  .history-hint { margin-top:13px; font-size:11px; color:var(--muted); }
+  .empty-history { border:1px dashed #373732; border-radius:7px; padding:17px 13px; font-size:12px; color:var(--muted); }
+  .receipt { min-width:0; }
+  .empty-receipt { min-height:260px; display:flex; flex-direction:column; justify-content:center; align-items:flex-start; padding:30px; border:1px dashed #3b3b35; border-radius:9px; background:linear-gradient(135deg,#3987e506,transparent 70%); }
+  .empty-receipt .symbol { width:34px; height:34px; border:1px solid #3987e55c; color:var(--blue); display:grid; place-items:center; border-radius:8px; font-size:18px; margin-bottom:17px; }
+  .empty-receipt h2 { font-size:18px; font-weight:550; margin-bottom:7px; }
+  .empty-receipt p { color:var(--muted); max-width:590px; font-size:13px; }
+  .receipt-head { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; margin-bottom:13px; }
+  .receipt-label { display:flex; flex-wrap:wrap; align-items:center; gap:9px; }
+  .receipt-label h2 { font-size:13px; font-weight:600; }
+  .receipt-actions { display:flex; gap:6px; }
+  .decision { border:1px solid var(--border); background:var(--surface); border-radius:8px; overflow:hidden; }
+  .decision-main { padding:20px 22px; }
+  .decision h3 { font-size:19px; font-weight:560; letter-spacing:-.015em; line-height:1.45; margin:9px 0 6px; overflow-wrap:anywhere; }
+  .decision-explanation { color:var(--text); font-size:12px; max-width:820px; }
+  .reason { margin-top:9px; color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
+  .reason strong { color:var(--text); font-weight:500; }
+  .meta-row { display:flex; flex-wrap:wrap; gap:8px 18px; font-size:11px; color:var(--muted); margin-top:14px; }
+  .meta-row span { overflow-wrap:anywhere; }
+  .stats { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); border-top:1px solid var(--border); }
+  .stat { padding:14px 22px; }
+  .stat+.stat { border-left:1px solid var(--border); }
+  .stat-value { color:var(--ink); font:24px/1.2 var(--mono); letter-spacing:-.04em; }
+  .stat-label { margin-top:5px; font-size:11px; color:var(--muted); }
+  .boundary { display:flex; align-items:flex-start; gap:9px; margin:13px 0 21px; font-size:11px; color:var(--muted); }
+  .boundary b { flex-shrink:0; color:var(--blue); font-weight:600; }
+  .table-toolbar { display:flex; flex-wrap:wrap; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; }
+  .switch { display:flex; gap:3px; padding:3px; border:1px solid var(--border); border-radius:7px; background:var(--surface); }
+  .switch button { background:none; color:var(--muted); border:0; border-radius:4px; padding:5px 9px; font-size:11px; }
+  .switch button[aria-pressed="true"] { background:#2d2d28; color:var(--ink); }
+  .table-hint { color:var(--muted); font-size:10px; }
+  .table-wrap { overflow-x:auto; border:1px solid var(--border); border-radius:8px; }
+  table { border-collapse:collapse; width:100%; font-size:12px; }
+  thead { background:var(--surface); }
+  th { color:var(--muted); text-align:left; font-size:10px; font-weight:550; padding:11px 12px; white-space:nowrap; }
+  th.rank,td.rank { text-align:center; width:67px; }
+  th.estimate,td.estimate { text-align:right; width:92px; }
+  td { padding:13px 12px; border-top:1px solid var(--border); vertical-align:top; }
+  td.rank { font:12px/1.7 var(--mono); padding-top:15px; color:var(--muted); }
+  td.rank.used { color:var(--blue); }
+  td.estimate { font:12px/1.7 var(--mono); padding-top:15px; color:var(--muted); }
+  .candidate-name { font-size:12px; font-weight:550; color:var(--ink); overflow-wrap:anywhere; }
+  .candidate-path { color:var(--muted); font:10px/1.6 var(--mono); margin:3px 0 6px; overflow-wrap:anywhere; }
+  .candidate-tags { display:flex; flex-wrap:wrap; gap:5px; }
+  .tag { padding:1px 6px; border:1px solid var(--border); border-radius:4px; color:var(--muted); font-size:9px; }
+  .tag.required { border-color:#e3bb7640; color:var(--amber); }
+  .tag.freshness-stale,.tag.freshness-unknown { border-color:#e3bb7640; color:var(--amber); }
+  .candidate-reason { color:var(--muted); font-size:11px; margin-top:7px; overflow-wrap:anywhere; }
+  .no-candidates { text-align:left; padding:24px 17px; color:var(--muted); }
+  .detail-section { border-top:1px solid var(--border); margin-top:23px; padding-top:15px; font-size:12px; }
+  .detail-section summary { cursor:pointer; color:var(--text); font-size:12px; }
+  .detail-section ul { color:var(--muted); margin:10px 0 0; padding-left:19px; }
+  .detail-section li { padding:3px 0; overflow-wrap:anywhere; }
+  .audit { display:grid; grid-template-columns:135px minmax(0,1fr); gap:6px 12px; margin:13px 0 0; font-size:11px; }
+  .audit dt { color:var(--muted); }
+  .audit dd { margin:0; color:var(--text); font-family:var(--mono); overflow-wrap:anywhere; }
+  .sr-only { position:absolute; width:1px; height:1px; padding:0; margin:-1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; border:0; }
+  a.sr-only:focus { position:fixed; width:auto; height:auto; clip:auto; top:10px; left:10px; z-index:10; padding:10px 15px; margin:0; background:var(--raised); border:1px solid var(--blue); border-radius:6px; }
+  @media(max-width:1040px) { .shell { padding:0 24px; } .setup { width:240px; } .workspace { grid-template-columns:225px minmax(0,1fr); gap:20px; } .step { padding:14px; } }
+  @media(max-width:780px) { .shell { padding:0 18px; } .hero { padding-top:25px; flex-direction:column; gap:15px; } .setup { width:100%; } .pipeline { grid-template-columns:1fr; } .step+.step { border-left:0; border-top:1px solid var(--border); } .step { padding:11px 15px; } .workspace { display:flex; flex-direction:column-reverse; gap:28px; } .workspace>* { width:100%; } .history-list { max-height:310px; overflow-y:auto; } .history-hint { max-width:500px; } .toplinks { gap:14px; } .composer { padding:16px; } .decision-main { padding:17px; } .stat { padding:13px 17px; } }
+  @media(max-width:520px) { .topbar .shell { min-height:57px; } .toplinks a { font-size:11px; } .brand { font-size:12px; gap:8px; } .brand svg { width:20px; } .toplinks #modeBadge { display:none; } .inputrow { flex-direction:column; } .submit-group { flex-direction:row; align-items:center; } .submit-group .btn { flex:1; } .composer-foot { flex-direction:column; gap:4px; } .receipt-actions .btn { padding:5px 8px; font-size:11px; } .stat { padding:12px; } .stat-value { font-size:21px; } .stat-label { font-size:10px; } th,td { padding-left:8px; padding-right:8px; } th.rank,td.rank { width:44px; } th.estimate,td.estimate { width:67px; } .audit { grid-template-columns:90px minmax(0,1fr); } }
+  @media(prefers-reduced-motion:reduce) { * { scroll-behavior:auto !important; } }
+</style>
+</head>
+<body>
+<a class="sr-only" href="#query">Skip to context preview</a>
+<header class="topbar">
+  <div class="shell">
+    <a class="brand" href="/" aria-label="Atlas home">
+      <svg viewBox="0 0 28 28" aria-hidden="true"><path d="M14 4L25 23H3Z" fill="none" stroke="#3987e5" stroke-width="1.7" stroke-linejoin="round"/><path d="M14 11.5L19.5 21h-11Z" fill="#3987e5" opacity=".23"/><circle cx="14" cy="8" r="1.15" fill="#80b7f7"/></svg>
+      <span>ATLAS</span>
+    </a>
+    <nav class="toplinks" aria-label="Context navigation">
+      <span class="pill" id="modeBadge"><span class="dot" aria-hidden="true"></span><span id="modeText">Loading settings</span></span>
+      <a href="/">Back to workspace <span aria-hidden="true">↗</span></a>
+    </nav>
+  </div>
+</header>
+<main class="shell">
+  <section class="hero" aria-labelledby="pageTitle">
+    <div>
+      <p class="eyebrow">An inspectable context layer</p>
+      <h1 id="pageTitle">Context decisions</h1>
+      <p class="lede">See what Atlas puts in an agent’s view, how it was chosen, and where judgment ends. Preview a task or inspect the decisions already made.</p>
+    </div>
+    <details class="setup" id="setupDetails">
+      <summary>How Jev is configured</summary>
+      <div class="inside">
+        <p id="setupStatus">Reading this project’s decision settings…</p>
+        <p>Settings live in <code>.atlas-decisions.json</code> in this project. This screen does not change them.</p>
+        <dl>
+          <dt>Off</dt><dd>Atlas uses local ranking. Jev is not called.</dd>
+          <dt>Shadow</dt><dd>Jev proposes a ranking for comparison. Atlas keeps local selection.</dd>
+          <dt>Assist</dt><dd>Jev can influence selection. Atlas protects explicitly required context.</dd>
+        </dl>
+        <p>Cloud processing needs explicit project permission and a configured provider. A model estimate never verifies code.</p>
+      </div>
+    </details>
+  </section>
+  <section class="pipeline" aria-label="How context is selected">
+    <div class="step"><span class="step-number">01</span><div><h2>Atlas finds the candidates</h2><p>Local search retrieves paths, symbols and summaries from project memory.</p></div></div>
+    <div class="step"><span class="step-number">02</span><div><h2>Jev estimates relevance</h2><p>When enabled, it scores that shortlist against your task.</p></div></div>
+    <div class="step"><span class="step-number">03</span><div><h2>You can inspect the choice</h2><p>A saved receipt shows the order used, protected context and any fallback.</p></div></div>
+  </section>
+  <form class="composer" id="previewForm">
+    <label for="query">What are you trying to build or understand?</label>
+    <div class="inputrow">
+      <textarea id="query" name="query" rows="2" maxlength="4000" required placeholder="For example: understand how a task brief preserves approved intent and selects relevant files" aria-describedby="previewPrivacy previewHelp"></textarea>
+      <div class="submit-group">
+        <button class="btn primary" id="previewButton" type="submit" disabled>Preview context <span aria-hidden="true">→</span></button>
+        <div class="limit"><label for="topK">Context items</label><select id="topK" name="top_k"><option value="5">5</option><option value="8" selected>8</option><option value="12">12</option></select></div>
+      </div>
+    </div>
+    <div class="composer-foot"><p class="privacy" id="previewPrivacy">Loading the project’s cloud-processing setting…</p><p id="previewHelp">Preview only. No code edits.</p></div>
+    <div class="notice" id="message" role="status" aria-live="polite" hidden></div>
+  </form>
+  <div class="workspace">
+    <aside aria-labelledby="historyTitle">
+      <div class="section-head"><h2 id="historyTitle">Recent decisions</h2><button class="quiet-btn" id="refreshHistory" type="button">Refresh</button></div>
+      <div class="history-list" id="historyList" aria-busy="true"><p class="empty-history">Loading saved receipts…</p></div>
+      <p class="history-hint">Saved by Atlas across agent and user queries. Selecting a receipt reads the original decision without running it again.</p>
+    </aside>
+    <section class="receipt" id="receiptPane" aria-label="Decision receipt" aria-busy="false">
+      <div class="empty-receipt" id="receiptEmpty"><div class="symbol" aria-hidden="true">≋</div><h2>A clear view of the agent’s context</h2><p>Preview a task to compare local ranking with the context actually selected. Each decision stays available here, including when Jev is off or a request falls back to local search.</p></div>
+      <div id="receiptContent" hidden>
+        <div class="receipt-head"><div class="receipt-label"><h2 tabindex="-1" id="receiptHeading">Decision receipt</h2><span class="pill" id="receiptStatus"></span></div><div class="receipt-actions"><button class="btn" type="button" id="copyReferences">Copy references</button><button class="btn" type="button" id="downloadReceipt">Save receipt</button></div></div>
+        <div class="notice error" id="receiptWarning" role="alert" hidden></div>
+        <article class="decision">
+          <div class="decision-main"><p class="eyebrow" id="decisionOutcome"></p><h3 id="receiptQuery"></h3><p class="decision-explanation" id="receiptExplanation"></p><p class="reason" id="receiptReason"></p><div class="meta-row" id="receiptMeta"></div></div>
+          <div class="stats"><div class="stat"><div class="stat-value" id="selectedCount">0</div><div class="stat-label" id="selectedCountLabel">items selected</div></div><div class="stat"><div class="stat-value" id="candidateCount">0</div><div class="stat-label">candidates considered</div></div><div class="stat"><div class="stat-value" id="protectedCount">0</div><div class="stat-label">required items protected</div></div></div>
+        </article>
+        <p class="boundary"><b>Judgment ≠ evidence</b><span>Relevance estimates help choose what to read. They do not prove that code works, matches intent or is safe to change.</span></p>
+        <div class="table-toolbar"><div class="switch" role="group" aria-label="Candidate view"><button type="button" id="showAll" aria-pressed="true">All candidates</button><button type="button" id="showSelected" aria-pressed="false">Selected context</button></div><span class="table-hint">Lower rank = earlier in the list · score 0–1</span></div>
+        <div class="table-wrap" role="region" aria-label="Candidate ranking comparison" tabindex="0"><table><caption class="sr-only">Local rank, Jev proposed rank, actual returned rank and model relevance estimate for each candidate</caption><thead><tr><th scope="col">Context</th><th scope="col" class="rank">Local</th><th scope="col" class="rank">Jev</th><th scope="col" class="rank" id="actualRankHeader">Used</th><th scope="col" class="estimate">Estimate</th></tr></thead><tbody id="candidateRows"></tbody></table></div>
+        <p class="history-hint">Source badges describe the state recorded with this decision. An older receipt does not establish the current state of your files.</p>
+        <details class="detail-section" id="limitationsSection" open><summary>Limits of this decision</summary><ul id="limitations"></ul></details>
+        <details class="detail-section"><summary>Receipt details</summary><dl class="audit" id="auditDetails"></dl></details>
+      </div>
+    </section>
+  </div>
+</main>
+<script>
+// @memory:feature:ContextDecisionTransparency
+// @memory:summary:Shows persisted context-selection receipts with local, proposed and used rankings without treating model scores as verification.
+(() => {
+  'use strict';
+  if (location.protocol === 'file:') return;
+  const $ = id => document.getElementById(id);
+  const state = {status:null, receipt:null, history:[], filter:'all', pending:false, receiptRequest:0, historyRequest:0};
+  const statusCopy = {
+    off: {label:'Jev off', tone:'', title:'Local selection', explanation:'Atlas used its local ranking. Jev did not influence this selection.'},
+    local: {label:'Local selection', tone:'', title:'Local selection', explanation:'Atlas selected this context locally. No Jev ranking was applied.'},
+    shadow: {label:'Shadow comparison', tone:'blue', title:'Local context kept', explanation:'Jev proposed an alternative ranking. Atlas kept the local selection so you can compare the two without changing the agent’s context.'},
+    applied: {label:'Jev assisted', tone:'blue', title:'Assisted selection', explanation:'Atlas used Jev’s relevance estimates to help order context, while preserving explicitly required items.'},
+    no_match: {label:'No Jev recommendation', tone:'amber', title:'Local candidates retained for inspection', explanation:'Jev did not recommend a candidate for this task. Atlas retained local candidates as starting points for inspection, without a model-backed relevance claim.'},
+    fallback: {label:'Local fallback', tone:'amber', title:'Local context kept', explanation:'The Jev ranking was not used. Atlas returned its local selection; the reason is recorded below.'}
+  };
+  function el(tag, className, value) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (value !== undefined && value !== null) node.textContent = String(value);
+    return node;
+  }
+  function list(value) { return Array.isArray(value) ? value : []; }
+  function copyFor(receipt) {
+    return statusCopy[receipt.status] || {label:'Status unavailable',tone:'amber',title:'Inspect this receipt',explanation:'This receipt has an unrecognised status. Inspect its recorded details before relying on the selection.'};
+  }
+  function rank(value) { return Number.isInteger(value) && value > 0 ? value : null; }
+  function orderedRank(ids, id, fallback) {
+    if (Array.isArray(ids)) { const i = ids.indexOf(id); return i < 0 ? null : i + 1; }
+    return rank(fallback);
+  }
+  function candidates(receipt) {
+    return list(receipt.candidates).filter(c => c && typeof c === 'object').map(c => {
+      const id = c.id || c.node_id || '';
+      const selectedRank = orderedRank(receipt.selected_ids, id, c.selected_rank);
+      return {...c,id,localRank:rank(c.local_rank) ?? orderedRank(receipt.baseline_ids,id,null),selectedRank,
+        proposedRank:receipt.status === 'no_match' || c.model_eligible === false ? null : (rank(c.proposed_rank) ?? orderedRank(receipt.proposed_ids,id,null)),
+        isSelected:Array.isArray(receipt.selected_ids) ? selectedRank !== null : (selectedRank !== null || c.selected === true)};
+    });
+  }
+  function pathLabel(c) {
+    const path = c.path || c.id || 'No source path';
+    const start = rank(c.start_line);
+    const end = rank(c.end_line);
+    return path + (start ? ':' + start + (end && end !== start ? '–' + end : '') : '');
+  }
+  function dateLabel(value, compact=false) {
+    if (!value) return 'Time not recorded';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return 'Time unavailable';
+    return date.toLocaleString(undefined, compact ? {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'} : {dateStyle:'medium',timeStyle:'medium'});
+  }
+  function notify(message, tone='info') {
+    $('message').textContent = message;
+    $('message').className = 'notice ' + tone;
+    $('message').hidden = !message;
+  }
+  async function api(path, options={}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 45000);
+    try {
+      const response = await fetch(path, {...options,signal:controller.signal,cache:'no-store'});
+      const data = await response.json();
+      if (!response.ok || data?.error) {
+        const error = new Error(typeof data?.error === 'string' ? data.error : 'Atlas could not complete this request (' + response.status + ').');
+        error.status = response.status;
+        throw error;
+      }
+      return data;
+    } catch(error) {
+      if (error.name === 'AbortError') throw new Error('Atlas did not respond in time. The decision may still finish; refresh the saved receipts before trying again.');
+      throw error;
+    } finally { clearTimeout(timer); }
+  }
+  function setPending(pending) {
+    state.pending = pending;
+    $('previewButton').disabled = pending || !state.status;
+    $('previewButton').textContent = pending ? 'Selecting context…' : 'Preview context →';
+    $('topK').disabled = pending;
+    $('previewForm').setAttribute('aria-busy', String(pending));
+  }
+  async function loadStatus() {
+    try {
+      state.status = await api('/api/context/status');
+      const s = state.status;
+      const mode = ['off','shadow','assist'].includes(s.mode) ? s.mode : 'off';
+      $('modeText').textContent = mode === 'off' ? 'Jev off · local' : (mode === 'shadow' ? 'Shadow mode' : 'Assist mode');
+      $('modeBadge').className = 'pill' + (mode !== 'off' ? ' blue' : '');
+      $('setupStatus').textContent = s.reason || (s.ready ? 'Jev is ready for this project.' : 'Atlas will use local selection until Jev is enabled and ready.');
+      $('previewPrivacy').textContent = mode !== 'off' && s.allow_cloud === true
+        ? 'This preview may send your task and candidate metadata to Jev under this project’s settings. A receipt is saved locally.'
+        : 'Local selection. This preview does not send your task to Jev. A receipt is saved locally.';
+      setPending(state.pending);
+    } catch(error) {
+      state.status = null;
+      $('modeText').textContent = 'Settings unavailable';
+      $('modeBadge').className = 'pill amber';
+      $('setupStatus').textContent = error.message;
+      $('previewPrivacy').textContent = 'Preview is unavailable until Atlas can read this project’s settings. Use Refresh to retry.';
+      setPending(false);
+    }
+  }
+  function renderHistory() {
+    const host = $('historyList');
+    host.replaceChildren();
+    host.setAttribute('aria-busy','false');
+    if (!state.history.length) { host.append(el('p','empty-history','No saved decisions yet. Start with a task preview above.')); return; }
+    for (const receipt of state.history) {
+      const button = el('button','history-item');
+      button.type = 'button';
+      button.setAttribute('aria-current',String(state.receipt?.id === receipt.id));
+      button.append(el('span','history-query',receipt.query || 'Untitled context query'));
+      const meta = el('span','history-meta');
+      meta.append(el('span','history-state' + (receipt.status === 'fallback' ? ' fallback' : ''),copyFor(receipt).label),el('span','',dateLabel(receipt.created_at,true)));
+      button.append(meta);
+      button.addEventListener('click',() => openReceipt(receipt.id,true));
+      host.append(button);
+    }
+  }
+  async function loadHistory(selectFirst=false) {
+    const request = ++state.historyRequest;
+    $('refreshHistory').disabled = true;
+    $('historyList').setAttribute('aria-busy','true');
+    try {
+      const data = await api('/api/context/history');
+      if (request !== state.historyRequest) return;
+      state.history = list(data.items).filter(item => item && item.id);
+      renderHistory();
+      if (selectFirst && !state.receipt && state.history.length) await openReceipt(state.history[0].id,false);
+    } catch(error) {
+      if (request !== state.historyRequest) return;
+      $('historyList').setAttribute('aria-busy','false');
+      if (!state.history.length) $('historyList').replaceChildren(el('p','empty-history','Saved receipts could not be loaded. Use Refresh to retry.'));
+      notify(error.message,'error');
+    } finally { if (request === state.historyRequest) $('refreshHistory').disabled = false; }
+  }
+  async function openReceipt(id,focus) {
+    const request = ++state.receiptRequest;
+    $('receiptPane').setAttribute('aria-busy','true');
+    try {
+      const receipt = await api('/api/context/receipt?id=' + encodeURIComponent(id));
+      if (request !== state.receiptRequest) return;
+      renderReceipt(receipt);
+      notify('');
+      if (focus) $('receiptHeading').focus({preventScroll:true});
+    } catch(error) {
+      if (request === state.receiptRequest) notify(error.status === 404 ? 'This receipt is missing or has expired. Choose another saved decision or run a new preview.' : error.message,'error');
+    }
+    finally { if (request === state.receiptRequest) $('receiptPane').setAttribute('aria-busy','false'); }
+  }
+  function renderCandidates() {
+    const receipt = state.receipt;
+    if (!receipt) return;
+    const all = candidates(receipt);
+    let shown = state.filter === 'selected' ? all.filter(c => c.isSelected) : all;
+    shown.sort((a,b) => (state.filter === 'selected' ? (a.selectedRank ?? Infinity) - (b.selectedRank ?? Infinity) : (a.localRank ?? Infinity) - (b.localRank ?? Infinity)) || String(a.id).localeCompare(String(b.id)));
+    $('showAll').textContent = 'All candidates (' + all.length + ')';
+    $('showSelected').textContent = (receipt.status === 'no_match' ? 'Returned context (' : 'Selected context (') + all.filter(c => c.isSelected).length + ')';
+    $('showAll').setAttribute('aria-pressed',String(state.filter === 'all'));
+    $('showSelected').setAttribute('aria-pressed',String(state.filter === 'selected'));
+    const rows = $('candidateRows');
+    rows.replaceChildren();
+    if (!shown.length) {
+      const row = el('tr');
+      const cell = el('td','no-candidates',all.length ? 'No candidates were selected for this query.' : 'Atlas found no candidates for this task. Try a concrete symbol, feature or source path. This does not prove that the behavior is absent.');
+      cell.colSpan = 5; row.append(cell); rows.append(row); return;
+    }
+    for (const c of shown) {
+      const row = el('tr');
+      const context = el('td');
+      context.append(el('div','candidate-name',c.name || c.id),el('div','candidate-path',pathLabel(c)));
+      const tags = el('div','candidate-tags');
+      if (c.kind) tags.append(el('span','tag',c.kind));
+      if (c.mandatory) tags.append(el('span','tag required','Required context'));
+      if (c.model_eligible === false) tags.append(el('span','tag','Local only'));
+      if (c.isSelected) tags.append(el('span','tag',receipt.status === 'no_match' ? 'For inspection' : 'Selected'));
+      const freshness = c.source_freshness === 'current' ? 'current' : c.source_freshness === 'stale' ? 'stale' : 'unknown';
+      const freshnessLabel = freshness === 'current' ? 'Source unchanged since indexing' : freshness === 'stale' ? 'Source changed · refresh required' : 'Freshness unknown';
+      tags.append(el('span','tag freshness-' + freshness,freshnessLabel));
+      context.append(tags);
+      if (c.reason) context.append(el('p','candidate-reason',c.reason));
+      row.append(context,el('td','rank',c.localRank ?? '—'),el('td','rank',c.proposedRank ?? '—'),el('td','rank used',c.selectedRank ?? (c.isSelected ? 'Yes' : '—')));
+      const score = c.model_eligible !== false && typeof c.relevance === 'number' && Number.isFinite(c.relevance) && c.relevance >= 0 && c.relevance <= 1 ? c.relevance.toFixed(2) : '—';
+      row.append(el('td','estimate',score)); rows.append(row);
+    }
+  }
+  function auditRow(label,value) {
+    $('auditDetails').append(el('dt','',label),el('dd','',value === undefined || value === null || value === '' ? 'Not recorded' : value));
+  }
+  function renderReceipt(receipt) {
+    if (!receipt || typeof receipt !== 'object' || !receipt.id) throw new Error('Atlas returned an incomplete decision receipt. Refresh and try again.');
+    state.receipt = receipt;
+    const copy = copyFor(receipt), all = candidates(receipt);
+    $('receiptEmpty').hidden = true;
+    $('receiptContent').hidden = false;
+    $('receiptWarning').textContent = receipt.persistence_warning ? 'Receipt not saved. ' + String(receipt.persistence_warning) + ' Use Save receipt to download a copy.' : '';
+    $('receiptWarning').hidden = !receipt.persistence_warning;
+    $('receiptStatus').textContent = copy.label;
+    $('receiptStatus').className = 'pill ' + copy.tone;
+    $('decisionOutcome').textContent = copy.title;
+    $('receiptQuery').textContent = receipt.query || 'Untitled context query';
+    $('receiptExplanation').textContent = copy.explanation;
+    $('receiptReason').replaceChildren();
+    if (receipt.reason) $('receiptReason').append(el('strong','','Recorded reason: '),document.createTextNode(String(receipt.reason)));
+    $('receiptReason').hidden = !receipt.reason;
+    $('selectedCount').textContent = Array.isArray(receipt.selected_ids) ? receipt.selected_ids.length : all.filter(c => c.isSelected).length;
+    $('selectedCountLabel').textContent = receipt.status === 'no_match' ? 'items returned for inspection' : 'items selected';
+    $('actualRankHeader').textContent = receipt.status === 'no_match' ? 'Returned' : 'Used';
+    $('candidateCount').textContent = all.length;
+    $('protectedCount').textContent = all.filter(c => c.mandatory && c.isSelected).length;
+    const meta = $('receiptMeta'); meta.replaceChildren();
+    meta.append(el('span','',dateLabel(receipt.created_at)));
+    if (receipt.source) meta.append(el('span','','Source: ' + receipt.source));
+    if (receipt.model && ['applied','shadow'].includes(receipt.status)) meta.append(el('span','',receipt.model));
+    if (typeof receipt.elapsed_ms === 'number' && Number.isFinite(receipt.elapsed_ms)) meta.append(el('span','',Math.round(receipt.elapsed_ms) + ' ms'));
+    meta.append(el('span','',receipt.cache_hit === true ? 'Cached ranking reused' : 'No cached ranking used'));
+    $('limitations').replaceChildren();
+    const limits = list(receipt.limitations).filter(value => typeof value === 'string' && value.trim());
+    if (!limits.length) limits.push('This receipt records context selection, not code verification.','Ranking only considers the retrieved candidates. Relevant code can still be missing from the shortlist.');
+    for (const value of limits) $('limitations').append(el('li','',value));
+    $('auditDetails').replaceChildren();
+    auditRow('Receipt ID',receipt.id); auditRow('Mode',receipt.mode); auditRow('Status',receipt.status);
+    auditRow('Provider',receipt.provider); auditRow('Model',receipt.model); auditRow('Policy version',receipt.policy_version);
+    auditRow('Evidence fingerprint',receipt.graph_fingerprint); auditRow('Cache',receipt.cache_hit === true ? 'Reused a saved ranking' : 'Not used');
+    if (receipt.usage && typeof receipt.usage === 'object') auditRow('Provider usage',JSON.stringify(receipt.usage));
+    renderCandidates(); renderHistory();
+    $('copyReferences').disabled = !all.some(c => c.isSelected);
+  }
+  async function preview(event) {
+    event.preventDefault();
+    const query = $('query').value.trim();
+    if (!query || state.pending || !state.status) return;
+    const request = ++state.receiptRequest;
+    setPending(true); notify('Selecting context and saving a decision receipt…');
+    $('receiptPane').setAttribute('aria-busy','true');
+    try {
+      const data = await api('/api/context/preview',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query,top_k:Number($('topK').value)})});
+      if (request === state.receiptRequest) {
+        renderReceipt(data.selection);
+        notify(data.selection.persistence_warning ? 'Preview ready, but its receipt could not be saved. Download it below to keep a copy.' : 'Preview saved. Review the context selected below.',data.selection.persistence_warning ? 'error' : 'info');
+        $('receiptHeading').focus({preventScroll:true});
+      }
+      await loadHistory(false);
+    } catch(error) { if (request === state.receiptRequest) notify(error.message,'error'); }
+    finally { setPending(false); if (request === state.receiptRequest) $('receiptPane').setAttribute('aria-busy','false'); }
+  }
+  $('previewForm').addEventListener('submit',preview);
+  $('refreshHistory').addEventListener('click',() => { loadStatus(); loadHistory(!state.receipt); });
+  $('showAll').addEventListener('click',() => { state.filter = 'all'; renderCandidates(); });
+  $('showSelected').addEventListener('click',() => { state.filter = 'selected'; renderCandidates(); });
+  $('copyReferences').addEventListener('click',async () => {
+    if (!state.receipt) return;
+    const refs = candidates(state.receipt).filter(c => c.isSelected).sort((a,b) => (a.selectedRank ?? Infinity) - (b.selectedRank ?? Infinity)).map(c => pathLabel(c) + (c.name ? ' · ' + c.name : ''));
+    try { await navigator.clipboard.writeText(refs.join('\n')); notify('Selected references copied.'); }
+    catch (_) { notify('The browser could not copy references. Save the receipt to keep the selected paths.','error'); }
+  });
+  $('downloadReceipt').addEventListener('click',() => {
+    if (!state.receipt) return;
+    const blob = new Blob([JSON.stringify(state.receipt,null,2)],{type:'application/json'});
+    const url = URL.createObjectURL(blob), anchor = el('a');
+    anchor.href = url; anchor.download = 'atlas-context-' + String(state.receipt.id).replace(/[^a-z0-9_-]/gi,'').slice(0,64) + '.json';
+    document.body.append(anchor); anchor.click(); anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url),1000);
+  });
+  const params = new URLSearchParams(location.search);
+  if (params.has('q')) $('query').value = (params.get('q') || '').slice(0,4000);
+  const requestedReceipt = params.get('receipt');
+  loadStatus();
+  loadHistory(!params.has('receipt') && !params.has('q'));
+  if (params.has('receipt')) {
+    if (/^[a-f0-9]{32}$/i.test(requestedReceipt || '')) openReceipt(requestedReceipt,false);
+    else notify('This receipt link is invalid. Select a saved decision from history or run a new preview.','error');
+  }
+})();
+</script>
+</body>
+</html>
