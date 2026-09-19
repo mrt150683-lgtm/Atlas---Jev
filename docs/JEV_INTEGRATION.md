@@ -13,6 +13,11 @@ The first implementation adds optional relevance ranking and explains context se
 conditional on measured value. No live Jev quality, coding success or token
 savings are claimed by this branch's offline tests.
 
+A subsequent [live connection check](audits/jev-live-connection-2026-09-19.md)
+validated authentication and one real structural shadow comparison. Retrieval
+quality and coding benefits remain unmeasured; the legacy saved map still needs
+a refresh with source and summary provenance.
+
 ## Requirements
 
 | Goal | Source | Acceptance condition |
